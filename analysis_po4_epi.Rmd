@@ -1,0 +1,347 @@
+---
+title: "Lake Geneva DO Analysis"
+author: "Ethan Deyle, Damien Bouffard, et al."
+date: '`r format(Sys.Date(), "%B %d, %Y")`'
+output:
+  html_document: 
+    toc: true
+    number_sections: true
+---
+
+# Intro and Setup
+
+```{r Packages}
+library(readr)
+library(tidyverse)
+library(ggplot2)
+library(gridExtra)
+library(lubridate)
+
+library("rEDM",lib.loc = "./LIB")
+
+rm(list = ls())
+```
+
+```{r Help Functions}
+source('./FUNCTIONS/F_EDM_analysis.R')
+source('./FUNCTIONS/F_data_and_plots.R')
+```
+
+```{r Import Data}
+data_file <- './data/lake_geneva_proc_extended_2019_07_30.Rdata'
+```
+
+## Basic Plots
+
+### Univariate EDM Plots for PO4_epi
+
+```{r Plot rho vs tp}
+load(data_file)
+
+target_var <- "PO4_epi"
+
+data_univar <- lake_geneva_interp %>% filter(date>="1976-05-08") %>% pull(PO4_epi)
+
+out_simplex <- simplex( data_univar,E=1:15,tau=4,tp=4,exclusion_radius = 4)
+
+ggplot(out_simplex,aes(x=E,y=rho)) + geom_line() + theme_bw() + scale_x_continuous(limits=c(1,10),breaks = seq(2,10,2))
+
+out_tp <- do.call(bind_rows,
+                  lapply(1:48,function(tp) {
+                    simplex(lake_geneva_interp[,target_var],
+                            pred = c(1,NROW(lake_geneva_interp)-48+tp),
+                            tau=4,tp=tp,E=12,
+                            exclusion_radius = 12)
+                  }))
+
+out_smap <- s_map(data_univar,tau=1,tp=1,E=12)
+
+ggplot(out_smap,aes(x=theta,y=rho)) + geom_line() + theme_bw() + scale_x_continuous(limits=c(0,8),breaks = seq(2,10,2))
+ggplot(out_tp,aes(x=tp,y=rho)) + geom_line()
+```
+
+
+
+### Scatterplots vs. PO4_surf
+
+```{r Plot scatter with oxydeep}
+load(data_file)
+
+data_long <- tidyr::gather(lake_geneva_interp, variable, value, -c(date,PO4_epi))
+data_plot <- ggplot(data_long, aes(y=PO4_epi, x=value)) + 
+  geom_path(color = 'grey70', lwd = 0.1,alpha = .8) +  
+  geom_point(color = "red", size = 0.2) +
+  facet_wrap(~variable, scales = "free_x") + 
+  theme_bw()
+# coord_flip()
+
+print(data_plot)
+```
+### Time Scales
+
+Do basic statistical analysis of the candidate time series to identify the de-correlation time (first time in the auto-correlation function drops below 1/e ~ .37). This helps indicate if the time series are over-sampled and should be treat with tau/tp > 1.
+
+```{r Plot oxydeep ACF}
+acf.PO4_epi <- acf(lake_geneva_interp$PO4_epi,na.action=na.pass,lag.max = 48,plot = FALSE)
+
+plot(acf.PO4_epi,axes=FALSE,main = "",xlab= "")
+axis(1,at=seq(0,48,by=12))
+axis(2)
+title(main='PO4_epi ACF',xlab='months')
+box()
+```
+
+## Multivariate EDM
+
+Get three baselines of forecast skill for the target variable: univariate EDM, seasonal, and multiview.
+
+```{r}
+load(data_file)
+
+block_PO4_epi_mEDM <- lake_geneva_interp %>%
+    mutate(year_sine=sin(2*pi*yday(date)/365)) %>%
+    mutate(year_cosine=cos(2*pi*yday(date)/365)) %>%
+    # mutate(T_diff_model=T_air-T_surf_model) %>%
+    filter(date>="1976-05-08") %>%
+    mutate_at(vars(-date),funs(./sd(.,na.rm=TRUE))) %>%
+  select(-pp)
+```
+
+```{r}
+file_baselines <- "./OUTPUTS/mEDM_PO4_epi_baselines.Rdata"
+
+if(!file.exists(file_baselines)){
+
+results_mEDM_multiview_fullfit <-  block_PO4_epi_mEDM %>% 
+        select(-T_surf,-Ptot_lake,-Ptot_epi,-T_air,-year_cosine) %>%
+        multiview(lib=c(1,nrow(block_PO4_epi_mEDM)),pred=c(1,nrow(block_PO4_epi_mEDM)),
+                  target_column="PO4_epi",
+                  max_lag=3,E=4,
+                  first_column_time = T)
+
+results_mEDM_seasonal <- do_mEDM_models(block=block_PO4_epi_mEDM,  list( c('year_sine','year_cosine') ),target_var='PO4_epi',tp=1)$multi_stats[[1]]
+
+E.univar <- 3
+results_univar <- s_map(data_univar,tau=4,tp=4,E=E.univar)
+
+save(results_univar,
+     results_mEDM_seasonal,
+     results_mEDM_multiview_fullfit,
+     # results_mEDM_multiview_nfold,n_fold,lib_ns,
+     file=file_baselines)
+
+}
+```
+
+Forecast PO4_epi using greedy approach from the two focal variables, nutrient loading (PO4_lake) and temperature (T_surf_model).
+
+```{r}
+file_greedy <- "./OUTPUTS/mEDM_PO4_epi_greedy.Rdata"
+
+if(!file.exists(file_greedy)){
+  L_candidate_variables <- c('year_sine','chl','rhone','Z_thermo_model')
+  
+  results_mEDM_greedy <- do_mEDM_greedy(block_PO4_epi_mEDM,embed0=c('T_surf_model','PO4_lake'),L_candidate_variables,target_col="PO4_epi",max_E=6)
+  save(results_mEDM_greedy,file=file_greedy)
+}
+```
+
+Plot the mEDM model selected with the greedy algorithm along with the baseline models.
+
+```{r}
+load('./mEDM_PO4_epi_baselines.Rdata') # results_univar,results_mEDM_multiview_fullfit,results_mEDM_multiview_nfold
+load('./mEDM_PO4_epi_greedy.Rdata') # results_mEDM_greedy
+
+results_mEDM_greedy %>%
+    mutate(embedding_label = str_replace_all(embedding_label,pattern=dictionary_extended_to_expressions %>% unlist())) %>%
+    mutate(embedding_label = make_label_parsable(embedding_label)) %>%
+    mutate(embedding_label = str_replace_all(embedding_label,"_model","")) %>%
+ggplot(aes(x=theta,y=rho,color=embedding_label)) + 
+    geom_line(lwd=1.3) +
+    geom_line(data=results_univar,aes(color="univariate"),lwd=1) +
+    geom_line(data=results_mEDM_seasonal,aes(color="seasonal")) +
+    geom_hline(aes(yintercept=results_mEDM_multiview_fullfit$rho,color="multiview"),lwd=1) +
+    # scale_color_viridis_d(labels= f_q_exp)
+    ggsci::scale_color_jco(labels = f_q_exp) +
+    theme_bw()
+
+```
+
+
+### Look at forecast decay
+
+We look at S-map forecast skill as a function of the prediction interval (number of time-steps).
+
+```{r}
+load(data_file)
+
+lake_geneva_interp <- lake_geneva_interp %>%
+    mutate(year_sine=sin(2*pi*yday(date)/365)) %>%
+    mutate(year_cosine=cos(2*pi*yday(date)/365)) %>%
+    filter(date>="1976-05-08") %>%
+    mutate(T_diff_model=T_air-T_surf_model)
+
+
+L_models <- list( c('T_surf_model','PO4_lake','year_sine'),
+                  c('T_surf_model','PO4_lake','year_sine','chl'),
+                  c('year_cosine','year_sine'))
+
+sim_col <- "chl"
+phys_vars <- c("T_surf","Z_thermo","wind_speed","T_air","rhone","T_surf_model","Z_thermo_model","year_sine","year_cosine")
+tp_max <- 3*12
+
+lake_geneva_sim <- lake_geneva_interp %>%
+    rename(time=date) %>%
+    # mutate(oxydeep_delta = c(NA,diff(oxydeep))) %>%
+    mutate_at(vars(phys_vars),funs(lead(.,1))) %>%
+    filter(complete.cases(.))
+
+I_start_points <- 1:( NROW(lake_geneva_sim) - tp_max)
+
+
+
+results_sim_tp_smap <- map_df(L_models,function(L_model_i){
+    
+    block_model_i <- lake_geneva_sim[,c('time',union(L_model_i,sim_col))]
+    
+    results_sim <- map_df(I_start_points,function(i_start){
+        
+        block_sim_i <- block_model_i[i_start + 0:tp_max,]
+        
+        out_sim_i <- sim_EDM_smap(block_model_i,
+                                       block_sim_i,
+                                       tp_max,
+                                       tp = 1,
+                                       lib_train = c(1,NROW(block_model_i)),
+                                       pred_sim = c(1,NROW(block_model_i)),
+                                       sim_col = sim_col, # could set to which columns are NAs
+                                       normalize = TRUE,
+                                       predictor_col=L_model_i,
+                                       theta = c(0,.1,.5,1,2,3,4,5,6,7,8),
+                                       keep_trajectories = TRUE,
+                                       first_column_time = TRUE,
+                                       bootstrap = FALSE,
+                                       exclusion_radius = 90
+                                       ) %>%
+            rename(date=time) %>%
+            group_by(type) %>%
+            mutate(tp=row_number()-1) %>%
+            ungroup()
+    }
+    
+    )
+    
+    results_sim_chl <- full_join( results_sim %>%
+                                      filter(type=='sim') %>%
+                                      select(date,tp,chl) %>%
+                                      rename(pred=chl) ,
+                                  results_sim %>%
+                                      filter(type=='true') %>%
+                                      select(date,tp,chl) %>%
+                                      rename(obs=chl),
+                                  by = c("date","tp")) %>%
+                        mutate(embedding=label_embeddings(paste(1:length(L_model_i),collapse=","),
+                                                          L_model_i,
+                                                          dictionary=dictionary_extended))
+    
+}) # map(L_models_)
+
+
+results_sim_tp_smap %>%
+    group_by(tp,embedding) %>%
+    summarise(compute_stats(obs,pred) %>% list()) %>%
+    unnest() %>%
+    ggplot(aes(x=tp,y=rho)) + geom_line(aes(color=embedding))
+
+
+
+results_sim_tp_smap %>%
+    group_by(tp,embedding) %>%
+    summarise(compute_stats(obs,pred) %>% list()) %>%
+    unnest() %>%
+    ggplot(aes(x=tp,y=mae)) + geom_line(aes(color=embedding))
+```
+
+We can visualize time series of 6m, 1yr, 18m, 2yr forecasts to check that the S-map models are producing reasonable behavior even as forecast skill decreases.
+
+```{r}
+load(data_file)
+
+lake_geneva_interp <- lake_geneva_interp %>%
+    mutate(year_sine=sin(2*pi*yday(date)/365)) %>%
+    mutate(year_cosine=cos(2*pi*yday(date)/365)) %>%
+    filter(date>="1976-05-08") %>%
+    mutate(T_diff_model=T_air-T_surf_model)
+
+L_models <- list( c('T_surf_model','PO4_lake','year_sine'),
+                  c('T_surf_model','PO4_lake','year_sine','chl'),
+                  c('year_cosine','year_sine'))
+
+sim_col <- "chl"
+
+
+v_plot_times <- c(6,24,36)
+# v_plot_times <- c(1,6,12)
+tp_max <- max(v_plot_times)+1
+
+# tp_max <- 5
+
+lake_geneva_sim <- lake_geneva_interp %>%
+    rename(time=date) %>%
+    # mutate(oxydeep_delta = c(NA,diff(oxydeep))) %>%
+    mutate(oxydeep = lag(oxydeep,1)) %>%
+    filter(complete.cases(.))
+
+I_start_points <- 1:( NROW(lake_geneva_sim) - tp_max)
+
+
+
+results_sim_tp_exp <- map_df(L_models,function(L_model_i){
+    
+    block_model_i <- lake_geneva_sim[,c('time',union(sim_col,L_model_i))]
+    
+    results_sim <- map_df(I_start_points,function(i_start){
+        
+        block_sim_i <- block_model_i[i_start + 0:tp_max,]
+        
+        out_sim_i <- sim_EDM_smap(block_model_i,
+        # out_sim_i <- sim_EDM_smap_diff(block_model_i,
+                                       block_sim_i,
+                                       tp_max,
+                                       tp = 1,
+                                       lib_train = c(1,NROW(block_model_i)),
+                                       pred_sim = c(1,NROW(block_model_i)),
+                                       sim_col = sim_col, # could set to which columns are NAs
+                                       predictor_col=L_model_i,
+                                       normalize = TRUE,
+                                       theta = c(0,.1,.5,1,2,3,4,5,6,7,8),
+                                       keep_trajectories = TRUE,
+                                       first_column_time = TRUE,
+                                       bootstrap = FALSE,
+                                       exclusion_radius = 90) %>%
+            
+            
+            rename(date=time) %>%
+            group_by(type) %>%
+            mutate(tp=row_number()-1)
+    }
+    
+    )
+    
+    results_sims <- results_sim %>% ungroup() %>%
+        filter(type=='sim') %>%
+        select(date,tp,chl) %>%
+                        mutate(embedding=label_embeddings(paste(1:length(L_model_i),collapse=","),
+                                                          L_model_i,
+                                                          dictionary=dictionary_extended)) %>%
+        filter(tp %in% v_plot_times)
+    
+}) # map(L_models_)
+
+
+results_sim_tp_exp %>%
+    ggplot(aes(x=date,y=chl)) + geom_line(data=lake_geneva_interp,aes(color="OBSERVED")) + geom_line(aes(color=embedding)) + facet_grid(tp~embedding)
+
+results_sim_tp_exp %>% left_join(lake_geneva_interp %>% select(date,chl),by="date") %>% group_by(tp,embedding) %>% summarise(rho=cor(chl.x,chl.y))    
+
+```

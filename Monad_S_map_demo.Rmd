@@ -1,0 +1,199 @@
+## Preamble
+```{r}
+library(tidyverse)
+library(deSolve)
+library(rgl)
+library(rEDM)
+library(gridExtra)
+library(colorspace)
+```
+
+## Seasonal Monad
+
+Ref: Huppert A., Blasius B., Olinky R., and Stone L. A model for seasonal phytoplankton blooms
+Figure 10 c,d. The classical Monad equations with seasonal growth rate.
+
+### Model Definition
+
+```{r}
+sim_Monad <- function(params,
+                      x0,
+                       sim_length = 50,
+                    burn_length = 10,
+                    tau = 1/48){
+    dF <- function(t,x,params){
+        with(as.list(c(params,x)),{
+            # beta <- 1 + delta_*ifelse(sin(2*pi*t)>0,1,-1)
+            beta <- 1 + delta_*(sin(2*pi*t))
+            dN <- I_ - b_*beta*(N*P)/(k_+N) - q_*N
+            dP <- c_*beta*N*P/(k_+N) - d_*P
+            return(list(c(dN,dP),beta=beta))
+        }) # with({})
+    } # dF
+    
+    out <- ode(y = x0,
+               times = seq(-burn_length,sim_length,by=tau),
+               func = dF,
+               parms = params)
+    
+    out <- as.data.frame(out) %>%
+        filter(time > 0)
+    
+    return(out)
+}
+```
+
+Parameters
+
+```{r}
+mu_Monad_ab <- c(I_ = 1500,
+              b_ = 0.0000204,
+              c_ = 83,
+              d_ = 73,
+              q_ = 0.1,
+              k_ = 65,
+              delta_ = 0.12)
+
+mu_Monad_cd <- c(I_ = 720,
+              b_ = 0.0000204,
+              c_ = 83,
+              d_ = 73,
+              q_ = 0.1,
+              k_ = 65,
+              delta_ = 0.08)
+
+x0 <- c(N=800,P=10^3)
+```
+
+Generate data and normalize.
+
+```{r}
+data_Monad <- sim_Monad(params = mu_Monad_cd,x0 = x0,burn_length = 70,sim_length = 50)
+
+block_Monad <- data_Monad %>%
+    filter(row_number() %% 2 == 0) %>%
+  mutate_at(vars(-time),list(~ ./max(.,na.rm=TRUE)))
+```
+
+Define plotting function to visualize S-map weighting scheme.
+
+```{r}
+plot_attractor_and_smapweight <- function(block_3d,index_target=nrow(block_3d)-1,theta=0,n_colors=99,no_lines=FALSE){
+  
+  # names(block_3d) <- c("x","y","z")
+  
+  dist_to_target <- map_dbl(1:nrow(block_3d), ~ norm(block_3d[.,2:4] - block_3d[index_target,2:4],type="2"))
+  
+  w_smap <- exp(-theta*dist_to_target/mean(dist_to_target))
+  
+    # df_plot <- bind_cols(block_3d,data.frame(w_smap=w_smap)) %>%
+    #     mutate(color_s_map  = cut(w_smap,
+    #                            # breaks=c(-999,seq(0,1,length.out=n_colors)),
+    #                            breaks = seq(0,1,length.out=n_colors+1),
+    #                            labels=diverge_hcl(n_colors)))
+  
+  df_plot <- bind_cols(block_3d,data.frame(w_smap=w_smap))
+    
+    rgl::open3d()
+    
+    for(i in 1:(NROW(df_plot)-1)){
+      if(i == index_target){
+        points3d(df_plot[i,2],
+                 df_plot[i,3],
+                 df_plot[i,4],
+                 color="red",
+                 size=9
+        )
+      }else{
+        points3d(df_plot[i,2],
+                 df_plot[i,3],
+                 df_plot[i,4],
+                 alpha=df_plot[i,'w_smap'])
+        if(!no_lines){
+        lines3d(df_plot[(i):(i+1),2],
+                df_plot[(i):(i+1),3],
+                df_plot[(i):(i+1),4],
+                alpha=df_plot[i,'w_smap'])
+          }
+      }
+    } # for(i)
+    
+    return(df_plot)
+}
+```
+
+Define a viewpoint for rgl.
+
+```{r}
+# a <- 1/15
+a <- 2/15
+
+M_1 <- diag(4) %*% matrix(c(1,0,0,0 ,
+                     0,cospi(a),-sinpi(a),0,
+                     0,sinpi(a),cospi(a),0,
+                     0,0,0,1),byrow = TRUE,nrow=4)
+M_2 <- rbind( c( 0.95376158, -0.006761581 , -0.3004880  ,  0),
+c(-0.09048322,  0.946909606, -0.3085050,    0),
+c(0.28662089, 0.321429372,  0.9025141,    0),
+c(0.0000000,  0.00000000,  0.0000000,    1)  )
+
+```
+
+Generate sequential weighting panels.
+
+```{r}
+dir_frames <- "FIGURES/SMAP_WEIGHTING/"
+file_root <- "monad_smap_weighting"
+
+t_0 = 27 + 2/12
+# t_0 = 7 + 3/12
+
+block_Monad_polar3d <- block_Monad %>%
+  filter(time <= t_0) %>%
+    mutate(x = N*sin(time*2*pi),y=P,z=N*cos(time*2*pi)) %>%
+    select(time,x,y,z)
+
+theta_list <- c(0,0.1,0.3,1,3,10)
+# theta_list <- c(0,3)
+
+for(i.theta in 1:length(theta_list)){
+  
+  theta_i <- theta_list[i.theta]
+  filename_i <- paste0(dir_frames,file_root,"theta=",formatC(theta_i,digits=2,flag="0",format="f"),".svg")
+  
+  
+  dump_plot <- plot_attractor_and_smapweight(block_Monad_polar3d,index_target = nrow(block_Monad_polar3d)-1,theta=theta_i)
+  
+  ## decorate polar
+  
+  lines3d(c(0,0),c(0,1),c(0,0))
+  text3d(0,1.1,0,"P",cex=2)
+  
+  # phi_labels=c('Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec')
+  phi_labels=c('Jan','Feb','','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec')
+  
+  # lines3d(c(0,1),c(0,0),c(0,0))
+  # lines3d(c(0,-1),c(0,0),c(0,0))
+  
+  
+  lines3d(c(0,1)*sin(pi/2),c(0,0),c(0,1)*cos(pi/2))
+  text3d(1.1*sin(pi/2),c(0,0),1.1*cos(pi/2),"N",cex=2)
+  # lines3d(c(0,1)*sin(ratio_i*(pi) + pi/2),c(0,0),c(0,1)*cos(ratio_i*(pi) + pi/2))
+  
+  text3d(1,1,0,paste(intToUtf8(952),"=",theta_i),cex=2)
+  
+  for(i.season in 1:12){
+    phi.i <- 2*pi*i.season/12
+    lines3d(c(0,1)*sin(phi.i),c(0,0),c(0,1)*cos(phi.i))
+    text3d(1.1*sin(phi.i),0,1.1*cos(phi.i),phi_labels[i.season])
+  }
+  
+  par3d(userMatrix=M_1)
+  par3d(windowRect=c(80,100,690,650))
+  
+  rgl.postscript( filename_i, fmt="svg", drawText = T )
+  
+}
+```
+
+```

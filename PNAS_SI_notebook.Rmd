@@ -1,0 +1,1413 @@
+---
+title: "SI Code"
+output:
+  word_document:
+    toc: yes
+    toc_depth: '2'
+  html_document:
+    toc: yes
+    toc_depth: 2
+---
+
+## Introduction
+
+Below are the key steps of data processing and computation for reproducing EDM and hybrid-model
+calculations in the main text. The full materials for calculations are available at the Github URL listed 
+in the text. In several cases we have condensed the code by calling functions to perform auxillary tasks
+like data curation. These are contained in the helper scripts sourced below, but need to be retrieved from
+the Github by readers who desire to reproduce the analysis.
+
+Also, please note we have made liberal use of the
+pipe operator "%>%" from the magrittr package. This operator takes the left-hand side as the first argument to
+right hand side, so "x %>% f" is equivalent to "f(x)" and "x %>% f(y,z,...)" is equivalent to "f(x,y,z,...)".
+
+First here are the required packages, including the archived version of rEDM.
+
+```{r}
+library('tidyverse')
+library('lubridate')
+
+library("rEDM",lib.loc = "./LIB")
+
+sessionInfo()
+```
+
+We additionally source a set of help functions to neaten plot creation.
+
+```{r,warning=FALSE,error=FALSE}
+source('./FUNCTIONS/F_data_and_plots.R')
+```
+
+## Preliminary Data Curation
+
+The EDM calculations in the manuscript include as explanatory variables two outputs of the
+parametric physical model, Simstrat. Thus it is necessary to first run Simstrat. Since
+the ease of installation will be platform dependent, we include the direct output of thermal
+structure as a supplemental file. The function "Simstrat_physics_initial()" is used, and
+is capable of generating the output file on a Windows machine that can run the archived
+binary of Simstrat. The function then calculates midnight values of the height of the mixed layer, h_mix, and surface temperature, T_surf.
+
+```{r}
+data_file <- "./INPUTS/EDM_input_data.Rdata"
+
+if(!file.exists(data_file)){
+  load("./DATA/lake_geneva_observ.Rdata")
+
+t_interp <- lake_geneva_interp$date
+
+Simstrat_out <- Simstrat_physics_inital(run=FALSE,
+                                        file.output = './OUTPUTS/LAKEGENEVA/T_out.dat')
+
+Simstrat_out_reduced <- Simstrat_out %>%
+  rename(date = time) %>%
+  mutate(date = ymd(date)) %>%
+  mutate(date = cut(date,breaks=c(min(t_interp)-days(30),t_interp),right=TRUE,labels=lag(t_interp)) %>% as.Date() ) %>%
+  group_by(date) %>%
+  # can calculate h_mix at midnight
+  summarise(h_mix_model = max(h_mix,na.rm=T), T_surf_model = mean(T_surf,na.rm=T))
+
+data_lake_geneva <- full_join(
+  lake_geneva_interp,
+  Simstrat_out_reduced,
+  by = "date"
+)
+
+save(data_lake_geneva,file=data_file)
+}
+
+load(data_file)
+```
+
+This yields the following variables for our primary analysis:
+
+```{r}
+names(data_lake_geneva)
+```
+
+## CCM calculations
+
+
+We generate CCM measurements to identify coupling using the purrr function map_df() to loop through candidates and arrange the results in a single data-frame. Note that the direction of CCM is counter to the direction of the indicated coupling, i.e. response variables will cross-map driver variables.
+
+```{r Cross-Map From DO_B, warning=FALSE}
+ccm_block <- data_lake_geneva %>%
+  select(-date)
+
+out.CCM_DO_delta <- map_df(names(ccm_block ),function(j){
+    
+    data <- ccm_block %>%
+        mutate(DO_delta = c(NA,diff(oxydeep)))
+    
+    ccm.temp <- do.call(bind_rows, lapply(1:10,function(E) {
+        ccm(data,lib_column = 'DO_delta',target_column = j,
+            E = E, tp = -1,
+            num_samples = 1,lib_sizes=NROW(data),random_libs = F)
+        }))
+    
+    Estar = ccm.temp$E[which.max(ccm.temp$rho)[1]]
+
+    ccm(data,lib_column = 'DO_delta',target_column = j,
+        E = Estar, tp = -floor(Estar/2),
+        num_samples = 1,lib_sizes=NROW(data),random_libs = F)
+})
+```
+
+These outputs are then used to Table S1.
+
+```{r}
+t_S1 <- out.CCM_DO_delta %>%
+    filter(target_column!="oxydeep") %>%
+    select(target_column,num_pred,rho) %>%
+    mutate(rho=signif(rho,digits=3)) %>%
+    arrange(-rho) %>%
+    rename(Driver=target_column,`Cross-map skill ()`=rho)
+
+print(t_S1)
+```
+
+We also calculate cross-map skill for the dynamic biogeochemistry variables, chl and TP_surf.
+These results are the basis for the table panels of Figure S4.
+
+```{r Cross-Map From chl and Surface PO4, warning=FALSE}
+ccm_block <- data_lake_geneva %>%
+    mutate(year_sine=sin(2*pi*yday(date)/365)) %>%
+    mutate(T_diff_model=T_air-T_surf_model) %>%
+  select(-date)
+
+out.CCM_chl <- map_df(names(ccm_block ),function(j){
+    
+    data <- ccm_block
+
+    ccm.temp <- do.call(bind_rows, lapply(1:10,function(E) {
+        ccm(data,lib_column = 'chl',target_column = j,
+            E = E, tp = -1,
+            num_samples = 1,lib_sizes=NROW(data),random_libs = F)
+        }))
+    
+    Estar = ccm.temp$E[which.max(ccm.temp$rho)[1]]
+    
+    ccm(data,lib_column = 'chl',target_column = j,
+        E = Estar, tp = -floor(Estar/2),
+        num_samples = 1,lib_sizes=NROW(data),random_libs = F)
+})
+
+out.CCM_po4 <- map_df(names(ccm_block ),function(j){
+    
+    data <- ccm_block
+    
+    ccm.temp <- do.call(bind_rows, lapply(1:10,function(E) {
+        ccm(data,lib_column = 'PO4_epi',target_column = j,
+            E = E, tp = -1,
+            num_samples = 1,lib_sizes=NROW(data),random_libs = F)
+        }))
+    
+    Estar = ccm.temp$E[which.max(ccm.temp$rho)[1]]
+    
+    ccm(data,lib_column = 'PO4_epi',target_column = j,
+        E = Estar, tp = -floor(Estar/2),
+        num_samples = 1,lib_sizes=NROW(data),random_libs = F)
+
+})
+```
+
+```{r}
+t_S5A <- out.CCM_chl %>%
+    filter(target_column!="chl") %>%
+    select(target_column,num_pred,rho) %>%
+    mutate(rho=signif(rho,digits=3)) %>%
+    arrange(-rho) %>%
+    rename(Driver=target_column,`Cross-map skill ()`=rho)
+
+print(t_S5A)
+
+t_S5B <- out.CCM_po4 %>%
+    filter(target_column!="PO4_epi") %>%
+    select(target_column,num_pred,rho) %>%
+    mutate(rho=signif(rho,digits=3)) %>%
+    arrange(-rho) %>%
+    rename(Driver=target_column,`Cross-map skill ()`=rho)
+
+print(t_S5B)
+```
+
+## Short-term Multivariate forecasting
+
+To perform short-term multivariate EDM forecasting analysis, we define functions to make calls to the rEDM function block_lnlp() to perform the short-term multivariate forecasting analyses across lists of specificed embedding coordinates.
+
+```{r}
+do_mEDM_models <- function(block,L_models,target_var='oxydeep',tp=0,exclusion_radius=6){
+  
+  theta_list <- c(0, 1e-04, 3e-04, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8)
+  
+  results_mEDM <- map(L_models,function(L){
+    
+    multi_stats <- map_df(theta_list, function(theta.i)
+      block_lnlp(block = block,
+                 target_column = match(target_var,names(block)),
+                 columns = match(L,names(block)),
+                 tp = tp,
+                 lib = c(1,NROW(block)),
+                 pred = c(1,NROW(block)),
+                 method = 's-map',
+                 theta = theta.i,
+                 num_neighbors = 0,
+                 exclusion_radius = exclusion_radius,
+                 stats_only = TRUE) )
+    
+    theta.i <- multi_stats$theta[which.max(multi_stats$rho)]
+    
+    multi_preds <- block_lnlp(block = block,
+                              target_column = match(target_var,names(block)),
+                              columns = match(L,names(block)),
+                              tp = tp,
+                              method = 's-map',
+                              theta = theta.i,
+                              num_neighbors = 0,
+                              exclusion_radius = exclusion_radius,
+                              stats_only = FALSE)$model_output[[1]]
+    
+    
+    
+    return(list(multi_stats=multi_stats,
+                multi_preds=multi_preds))
+  } # function(L)
+  ) # map(L_models)
+  
+  results_mEDM <- transpose(results_mEDM)
+  
+} #do_mEDM_models
+```
+
+Using this function, we create an additional function to performer sequential mEDM analysis with "greedy" variable selection.
+
+```{r}
+do_mEDM_greedy <- function(block,embed0,L_variables,target_col=1,tp=1,max_E=length(L_variables),...){
+  
+  result_embed0 <- do_mEDM_models(block=block, list(embed0),target_var=target_col,tp=tp,...) %>%
+    {do.call(bind_rows,.$multi_stats)} %>%
+    mutate(embedding_label=label_embeddings(embedding,
+                                            names(block),
+                                            dictionary = dictionary_extended) %>% as.factor()) %>%
+    mutate(embedding=embedding_int_to_chr(embedding,names(block)))
+  
+  g_steps <- vector(mode = 'list')
+  
+  while(T){
+    
+    L_models_greedy <- map(setdiff(L_variables,embed0),~c(embed0,.))
+    
+    df_RESULT_i <- do_mEDM_models(block=block, L_models_greedy,target_var=target_col,tp=tp,...) %>%
+      { do.call(bind_rows,.$multi_stats)} %>%
+      mutate(embedding_label=label_embeddings(embedding,
+                                              names(block),
+                                              dictionary = dictionary_extended) %>% as.factor()) %>%
+      mutate(embedding=embedding_int_to_chr(embedding,names(block)))
+    
+    g_step_i <- df_RESULT_i %>%
+      ggplot(aes(x=theta,y=rho,color=embedding_label)) + 
+      geom_line(lwd=.75) + 
+      geom_line(data=result_embed0,lwd=1) +
+      theme_bw()
+    g_steps <- c(g_steps,g_step_i)
+    
+    if(max(result_embed0$rho) > max(df_RESULT_i$rho)){
+      break
+    } # if (max rho)
+    
+    embed0 <- df_RESULT_i %>% top_n(1,rho) %>% pull(embedding) %>% unlist
+    result_embed0 <- df_RESULT_i %>% filter(paste(embedding)==paste(list(embed0)))
+    
+    if(length(embed0) >= max_E){
+      break
+    } # if length(embed0)
+  } #  while(T)
+  
+  return(result_embed0)
+} # function(do_mEDM_greedy)
+```
+
+Finally, note it is important to normalize inputs before multivariate analyses so that distances in each observational variable are roughly equivalent. Thus we define a second data frame with normalized observations.
+
+```{r}
+data_lake_geneva_norm <- data_lake_geneva %>%
+  select(-date) %>%
+  mutate(oxydeep_delta = c(NA,diff(oxydeep))) %>%
+  mutate_at(vars(-starts_with('oxy')),funs(./sd(.,na.rm=TRUE)))
+```
+
+### DO
+
+The initial multivariate EDM experiment for DO was designed to test the importance of biogeochemical drivers in predicting behavior, and the outputs are used to create Figure 1D. Note in this first analysis, DO in the previous time-step is not included as a possible predictor.
+
+```{r}
+target_var <- 'oxydeep'
+
+L_models <- list( c('h_mix','T_surf','T_air','rhone'),
+                  c('h_mix','T_surf','T_air','rhone','chl'),
+                  c('h_mix','T_surf','T_air','rhone','chl','PO4_epi'),
+                  c('h_mix','T_surf','T_air','rhone','chl','PO4_lake'),
+                  c('h_mix','T_surf','T_air','rhone','chl','PO4_epi','PO4_lake') )
+
+results_mEDM_exp1 <- do_mEDM_models(block=data_lake_geneva_norm,L_models=L_models,target_var=target_var,exclusion_radius=0)
+
+RESULTS_figure_1D <- do.call(bind_rows,results_mEDM_exp1$multi_stats) %>%
+    mutate(embedding=label_embeddings_parsable(embedding,
+                                      names(data_lake_geneva_norm),
+                                      dictionary = dictionary_expressions) %>% as.factor())
+
+f_q_exp <- function(breaks) { parse(text=breaks)}
+
+label_list <- map(unique(RESULTS_figure_1D$embedding),~ bquote(.))
+
+RESULTS_figure_1D %>% 
+    mutate(embedding = factor(embedding,
+                              levels = unique(embedding)[rank(str_count( unique(embedding),","),ties.method = 'first')])) %>%
+    ggplot(aes(x=theta,y=rho,color=embedding)) + geom_line(lwd=1) + 
+    scale_color_viridis_d(labels= f_q_exp) +
+    labs(x='Nonlinearity (\u03B8)',y='Forecast Skill (\u03C1)',color=NULL) + theme_bw() + theme(legend.position = "bottom",legend.text=element_text(size=7,hjust=0)) + guides(color=guide_legend(nrow=5,byrow=TRUE))
+```
+
+### Chlorophyll
+
+Multivariate EDM analysis of chlorophyll was used to characterize changing biogeochemical interactions, and provide simulations of chlorophyll under forcing scenarios for the hybrid model analysis.
+
+```{r}
+block_chl_mEDM <- data_lake_geneva %>%
+    mutate(year_sine=sin(2*pi*yday(date)/365)) %>%
+    mutate(year_cosine=cos(2*pi*yday(date)/365)) %>%
+    filter(date>="1976-05-08") %>%
+    mutate_at(vars(-date),list(~./sd(.,na.rm=TRUE)))
+
+data_univar <- data_lake_geneva %>% filter(date>="1976-05-08") %>% pull(chl)
+```
+
+```{r,cache=TRUE}
+fname.chl_greedy <- './OUTPUTS/mEDM_chl_greedy.Rdata'
+
+if(!file.exists(fname.chl_greedy)){
+  L_candidate_variables <- c('year_sine','chl','rhone','h_mix_model','PO4_epi')
+  
+  results_mEDM_greedy <- do_mEDM_greedy(block_chl_mEDM,embed0=c('T_surf_model','PO4_lake'),L_candidate_variables,target_col="chl",max_E=5)
+  save(results_mEDM_greedy,file=fname.chl_greedy)
+}else{
+  load('./OUTPUTS/mEDM_chl_greedy.Rdata')
+}
+
+results_mEDM_greedy %>% select(embedding,theta,rho,mae,rmse) %>% print()
+```
+
+This "mechanistic" multivariate model is also compared to univariate, seasonal, and multiview predictors of chlorophyll as validation.
+
+```{r,cache=TRUE}
+fname.chl_baselines <- './OUTPUTS/mEDM_chl_baselines.Rdata'
+
+if(!file.exists('./OUTPUTS/mEDM_chl_baselines.Rdata')){
+  results_mEDM_multiview_fullfit <-  block_chl_mEDM %>% 
+    select(-T_surf,-Ptot_lake,-Ptot_epi,-T_air,-year_cosine) %>%
+    multiview(lib=c(1,nrow(block_chl_mEDM)),pred=c(1,nrow(block_chl_mEDM)),
+              target_column="chl",
+              max_lag=3,E=4,
+              first_column_time = T)
+  
+  results_mEDM_seasonal <- do_mEDM_models(block=block_chl_mEDM,  list( c('year_sine','year_cosine') ),target_var='chl',tp=1)$multi_stats[[1]]
+  
+  E.univar <- 12
+  results_univar <- s_map(data_univar,tau=1,tp=1,E=E.univar)
+  
+  save(results_univar,
+     results_mEDM_seasonal,
+     results_mEDM_multiview_fullfit,
+     file=fname.chl_baselines)
+}
+
+
+```
+
+### Surface TP
+
+The same analysis is performed for PO4_surf as chl.
+
+```{r}
+block_PO4_epi_mEDM <- data_lake_geneva %>%
+    mutate(year_sine=sin(2*pi*yday(date)/365)) %>%
+    mutate(year_cosine=cos(2*pi*yday(date)/365)) %>%
+    filter(date>="1976-05-08") %>%
+    mutate_at(vars(-date),funs(./sd(.,na.rm=TRUE)))
+
+data_univar <- data_lake_geneva %>% filter(date>="1976-05-08") %>% pull(PO4_epi)
+```
+
+```{r}
+fname.PO4_epi_greedy <- './OUTPUTS/mEDM_PO4_epi_greedy.Rdata'
+
+L_candidate_variables <- c('year_sine','chl','rhone','h_mix_model')
+
+if(!file.exists(fname.PO4_epi_greedy)){
+  
+  results_mEDM_greedy <- do_mEDM_greedy(block_PO4_epi_mEDM,embed0=c('T_surf_model','PO4_lake'),L_candidate_variables,target_col="PO4_epi",max_E=6)
+  save(results_mEDM_greedy,file=fname.PO4_epi_greedy)
+}else{
+  load('./OUTPUTS/mEDM_PO4_epi_greedy.Rdata')
+}
+
+results_mEDM_greedy %>% select(embedding,theta,rho,mae,rmse) %>% print()
+```
+
+And again the multivariate model is compared to other EDM predictors.
+
+```{r,cache=TRUE}
+fname.PO4_epi_baselines <- './OUTPUTS/mEDM_PO4_epi_baselines.Rdata'
+
+if(!file.exists(fname.PO4_epi_baselines)){
+results_mEDM_multiview_fullfit <-  block_PO4_epi_mEDM %>% 
+        select(-T_surf,-Ptot_lake,-Ptot_epi,-T_air,-year_cosine) %>%
+        multiview(lib=c(1,nrow(block_PO4_epi_mEDM)),pred=c(1,nrow(block_PO4_epi_mEDM)),
+                  target_column="PO4_epi",
+                  max_lag=3,E=4,
+                  first_column_time = T)
+
+results_mEDM_seasonal <- do_mEDM_models(block=block_PO4_epi_mEDM,  list( c('year_sine','year_cosine') ),target_var='PO4_epi',tp=1)$multi_stats[[1]]
+
+E.univar <- 3
+results_univar <- s_map(data_univar,tau=4,tp=4,E=E.univar)
+
+save(results_univar,
+     results_mEDM_seasonal,
+     results_mEDM_multiview_fullfit,
+     file=fname.PO4_epi_baselines)
+
+}
+
+```
+
+## State-Dependent Interaction Coefficients
+
+These results are used for Figure 2.
+
+Examine CHL.
+
+```{r}
+L_model_i <- c('T_surf_model','PO4_lake','year_sine')
+sim_col <- "chl"
+
+block_model_i <- block_chl_mEDM[,c('date',union(L_model_i,sim_col))]
+
+block_chl_mEDM_raw <- data_lake_geneva %>%
+    mutate(year_sine=sin(2*pi*yday(date)/365)) %>%
+    mutate(year_cosine=cos(2*pi*yday(date)/365)) %>%
+    filter(date>="1976-05-08")
+
+out_s_map <- block_lnlp(block_model_i,theta=6,num_neighbors = 0,method="s-map",columns = L_model_i,target_column = "chl",stats_only = F,save_smap_coefficients = T,first_column_time = T)
+
+out_s_map_coeff <- out_s_map$smap_coefficients[[1]] %>%
+     rename_at(vars(1:length(L_model_i)),~map_chr(.,function(label_i){
+         col_i <- str_extract(label_i,"(?<=c_)[:digit:]+") %>% as.numeric()
+         return(paste("c",L_model_i[[col_i]],sep="_"))
+     } ))
+
+    bind_cols(block_chl_mEDM_raw,out_s_map_coeff) %>%
+        mutate(year = year(date)) %>%
+        group_by(year) %>%
+        summarise_at(vars(starts_with("c_"),PO4_lake),funs(mean,median)) %>%
+        ggplot(aes(x=PO4_lake_median,y=c_PO4_lake_median)) + geom_point() + 
+        geom_hline(yintercept = 0,lty=2,color="tomato") + 
+        stat_smooth() +
+        labs(title="Median Annual Effect\nof TP on Chl",x="TP (\u03BCg/L)",y="\u2202 Chl / \u2202 TP") +
+        theme_bw()
+
+```
+
+Examine DO.
+
+```{r}
+L_model_i <- c('PO4_epi','PO4_lake','h_mix_model','T_surf_model','chl','oxydeep')
+# L_model_i <- c('PO4_lake','h_mix_model','T_surf_model','chl','oxydeep')
+sim_col <- "oxydeep"
+
+block_oxy_mEDM <- data_lake_geneva %>%
+    mutate(oxydeep_delta = c(NA,diff(oxydeep))) %>%
+    mutate_at(vars(-oxydeep_delta,-date),funs(./sd(.,na.rm=TRUE)))
+block_model_i <- block_oxy_mEDM[,c("date",union(L_model_i,sim_col))]
+
+out_s_map <- block_lnlp(block_model_i,theta=6,num_neighbors = 0,method="s-map",columns = L_model_i,target_column = sim_col,stats_only = F,save_smap_coefficients = T,first_column_time = T)
+
+out_s_map_coeff <- out_s_map$smap_coefficients[[1]] %>%
+    rename_at(vars(1:length(L_model_i)),~map_chr(.,function(label_i){
+        col_i <- str_extract(label_i,"(?<=c_)[:digit:]+") %>% as.numeric()
+        return(paste("c",L_model_i[[col_i]],sep="_"))
+    } ))
+
+    bind_cols(data_lake_geneva,out_s_map_coeff) %>%
+        filter(month(date) %in% 5:10) %>%
+        mutate(year = year(date)) %>%
+        group_by(year) %>%
+        summarise_at(vars(starts_with("c_"),PO4_lake),funs(mean,median)) %>%
+        ggplot(aes(x=PO4_lake_median,y=c_chl_median)) + geom_point() + 
+        geom_hline(yintercept = 0,lty=2,color="tomato") + 
+        stat_smooth() +
+        labs(title = "Median May-Oct Effect\nof Chl on Bottom DO",x="TP (\u03BCg/L)",y="\u2202 DO / \u2202 Chl") +
+        theme_bw()
+```
+
+## EDM Simulation
+
+Define a function to perform iterative multivariate EDM forecasts of DO. For analysis of the historical data, S-map was used. However, due to its higher computational overhead, iterative forecasting for the hybrid model was done with the less computationally intensive simplex predictor. We define equivalent functions for both that have the same general structure.
+
+```{r}
+sim_EDM_smap_diff <- function(block_train,
+                              block_sim,
+                              t_sim,
+                              tp = 1,
+                              theta = 0,
+                              num_neighbors="e+1",
+                              lib_train = c(1,NROW(block_train)),
+                              pred_sim = c(1,NROW(block_sim)),
+                              sim_col = NULL, # could set to which columns are NAs
+                              predictor_col = 1:( NCOL(block_train) - 1 ),
+                              ...){
+  
+  n_var <- NCOL(block_train) - 1
+  
+  # Normalize and take differences
+  v_norms <- block_train %>%
+    summarise_all(list(~sd(.,na.rm=T)))
+  
+  block.t_norm <- bind_rows( block_train %>%
+                               mutate_at( set_names(sim_col,sim_col), list(delta = ~ c(NA,diff(.)))  ) %>%
+                               mutate(!!!imap(v_norms[-1],function(col_norm, col_name, data) data[[col_name]]/col_norm,.)) ,
+                             block_sim %>%
+                               mutate_at( set_names(sim_col,sim_col), list(delta = ~ c(NA,diff(.)))  ) %>%
+                               mutate(!!!imap(v_norms[-1],function(col_norm, col_name, data) data[[col_name]]/col_norm,.))
+  )
+  
+  # Fit S-map thetas to prediction of first-differenced values
+    if(length(theta)>1){
+        theta.star <- rep(NA,n_var)
+        for(i.col in sim_col){
+            
+            out.temp <- do.call(bind_rows,lapply(theta,function(theta.i){
+                block_lnlp(block.t_norm,lib=lib_train,pred=lib_train,
+                           method = 's-map',
+                           theta = theta.i,num_neighbors = 0,
+                           columns=predictor_col,
+                           target_column = paste0(i.col,"_delta"),
+                           first_column_time = TRUE,
+                           ...)
+            }))
+            
+            theta.star[i.col] <- theta[which.max(out.temp$rho)]
+        }}else{
+            theta.star=rep(theta,n_var)
+        }
+  
+  # Iterate through time
+  t_pred <- 1
+  while(t_pred < t_sim + 1){
+    t_pred <- t_pred+1
+    delY <- as.data.frame(array(dim=c(1,n_var),dimnames=list(NULL,names(block_train)[-1])))
+
+    lib_temp <- lib_train
+
+    # Evaluate simplex projection
+    for(i.col in sim_col){
+      
+      out.temp <- block_lnlp(block.t_norm,
+                             method='s-map',
+                             lib=lib_temp,
+                             pred=c((NROW(block_train))+(t_pred-1),(NROW(block_train))+t_pred),
+                             columns=predictor_col,
+                             theta=theta.star[i.col],
+                             target_column = paste0(i.col,"_delta"),
+                             num_neighbors = 0,
+                             stats_only = FALSE,
+                             silent = TRUE,
+                             first_column_time = TRUE,
+                             ...)
+      
+      delY[i.col] <- out.temp$model_output[[1]]$pred[1]
+      
+      # REPLACE IN BLOCK BY ADDING TO x_i.col(t_pred-1)
+      block.t_norm[NROW(block_train)+t_pred,paste0(i.col,"_delta")] <- delY[i.col]
+      block.t_norm[NROW(block_train)+t_pred,i.col] <- block.t_norm[NROW(block_train)+t_pred-1,i.col] + delY[i.col] 
+      
+    } # for(i.col)
+  }
+  
+  # Undo normalize
+  block_sim_out <- block.t_norm[(NROW(block_train))+(1:t_sim),] %>%
+    mutate(!!!imap(v_norms[-1],function(col_norm, col_name, data) data[[col_name]]*col_norm,.))
+  
+  return(
+    bind_rows( block_sim_out %>% mutate(type = 'sim'), #time=lib[2]+ 1:t_sim,
+               block_sim[1+(1:t_sim),] %>% mutate(type = 'true') ) #time=lib[2]+ 1:t_sim,
+  )
+} # sim_EDM_smap_diff
+
+```
+
+```{r}
+sim_EDM_simplex_diff <- function(block_train,
+                                 block_sim,
+                                 t_sim,
+                                 tp = 1,
+                                 num_neighbors="e+1",
+                                 lib_train = c(1,NROW(block_train)),
+                                 pred_sim = c(1,NROW(block_sim)),
+                                 sim_col = NULL, # could set to which columns are NAs
+                                 predictor_col = 1:( NCOL(block_train) - 1),
+                                 ...){
+
+  n_var <- NCOL(block_train) - 1
+  
+  v_norms <- block_train %>%
+    summarise_all(list(~sd(.,na.rm=T)))
+  
+  block.t_norm <- bind_rows( block_train %>%
+                               mutate_at( set_names(sim_col,sim_col), list(delta = ~ c(NA,diff(.)))  ) %>%
+                               mutate(!!!imap(v_norms[-1],function(col_norm, col_name, data) data[[col_name]]/col_norm,.)) ,
+                             block_sim %>%
+                               mutate_at( set_names(sim_col,sim_col), list(delta = ~ c(NA,diff(.)))  ) %>%
+                               mutate(!!!imap(v_norms[-1],function(col_norm, col_name, data) data[[col_name]]/col_norm,.))
+  )
+
+  t_pred <- 1
+  while(t_pred < t_sim + 1){
+    t_pred <- t_pred+1
+    delY <- as.data.frame(array(dim=c(1,n_var),dimnames=list(NULL,names(block_train)[-1])))
+    
+    lib_temp <- lib_train
+    
+    for(i.col in sim_col){
+      
+      out.temp <- block_lnlp(block.t_norm,
+                             method='simplex',
+                             lib=lib_temp,
+                             pred=c((NROW(block_train))+(t_pred-1),(NROW(block_train))+t_pred),
+                             columns=predictor_col,
+                             target_column = paste0(i.col,"_delta"),
+                             num_neighbors = num_neighbors,
+                             stats_only = FALSE,
+                             silent = TRUE,
+                             first_column_time = TRUE,
+                             ...)
+      
+      delY[i.col] <- out.temp$model_output[[1]]$pred[1]
+      
+      block.t_norm[NROW(block_train)+t_pred,paste0(i.col,"_delta")] <- delY[i.col]
+      block.t_norm[NROW(block_train)+t_pred,i.col] <- block.t_norm[NROW(block_train)+t_pred-1,i.col] + delY[i.col] 
+      
+    } # for(i.col)
+  }
+    block_sim_out <- block.t_norm[(NROW(block_train))+(1:t_sim),] %>%
+    mutate(!!!imap(v_norms[-1],function(col_norm, col_name, data) data[[col_name]]*col_norm,.))
+  
+  return(
+    bind_rows( block_sim_out %>% mutate(type = 'sim'), #time=lib[2]+ 1:t_sim,
+               block_sim[1+(1:t_sim),] %>% mutate(type = 'true') ) #time=lib[2]+ 1:t_sim,
+  )
+} # sim_EDM_simplex_diff
+```
+
+We define a third function that performs predictions on values of the target, rather than first differences. This is used for simulating chl and PO4_epi.
+
+```{r}
+sim_EDM_smap <- function(block_train,
+                         block_sim,
+                         t_sim,
+                         tp = 1,
+                         lib_train = c(1,NROW(block_train)),
+                         pred_sim = c(1,NROW(block_sim)),
+                         sim_col = NULL, # could set to which columns are NAs
+                         theta = 1,
+                         predictor_col = 1:( NCOL(block_train) - 1 ),
+                         ...){
+  
+  n_var <- NCOL(block_train) - 1
+  
+  block.t <- bind_rows(block_train,
+                       block_sim)
+  
+  v_norms <- block_train %>%
+    summarise_all(list(~sd(.,na.rm=T)))
+  
+  block.t_norm <- bind_rows( block_train %>%
+                               # mutate_at( set_names(sim_col,sim_col), list(delta = ~ c(NA,diff(.)))  ) %>%
+                               mutate(!!!imap(v_norms[-1],function(col_norm, col_name, data) data[[col_name]]/col_norm,.)) ,
+                             block_sim %>%
+                               # mutate_at( set_names(sim_col,sim_col), list(delta = ~ c(NA,diff(.)))  ) %>%
+                               mutate(!!!imap(v_norms[-1],function(col_norm, col_name, data) data[[col_name]]/col_norm,.))
+  )
+  
+  #### fit S-map thetas to prediction of each simulation column
+  if(length(theta)>1){
+    theta.star <- rep(NA,n_var)
+    for(i.col in sim_col){
+      
+      out.temp <- do.call(bind_rows,lapply(theta,function(theta.i){
+        block_lnlp(block.t_norm,lib=lib_train,pred=lib_train,
+                   method = 's-map',
+                   theta = theta.i,num_neighbors = 0,
+                   columns=predictor_col,
+                   target_column = i.col,
+                   first_column_time = TRUE,
+                   ...)
+      }))
+      
+      theta.star[i.col] <- theta[which.max(out.temp$rho)]
+    }}else{
+      theta.star=rep(theta,n_var)
+    }
+  
+  
+  t_pred <- 1
+  
+  while(t_pred < t_sim + 1){
+    t_pred <- t_pred+1
+    Y <- as.data.frame(array(dim=c(1,n_var),dimnames=list(NULL,names(block_train)[-1])))
+    
+    lib_temp <- lib_train
+    
+    for(i.col in sim_col){
+      
+      out.temp <- block_lnlp(block.t_norm,
+                             method='s-map',
+                             lib=lib_temp,
+                             pred=c((NROW(block_train))+(t_pred-1),(NROW(block_train))+t_pred),
+                             columns=predictor_col,
+                             target_column = i.col,
+                             theta=theta.star[i.col],
+                             num_neighbors = 0,
+                             stats_only = FALSE,
+                             silent = TRUE,
+                             first_column_time = TRUE,
+                             ...)
+      
+      Y[i.col] <- out.temp$model_output[[1]]$pred[1]
+      
+      block.t_norm[NROW(block_train)+t_pred,i.col] <- Y[i.col] 
+    } # for(i.col)
+  }
+  
+  block_sim_out <- block.t_norm[(NROW(block_train))+1+(1:t_sim),] %>%
+    mutate(!!!imap(v_norms[-1],function(col_norm, col_name, data) data[[col_name]]*col_norm,.))
+  
+  return(
+    bind_rows( block_sim_out %>% mutate(type = 'sim'), #time=lib[2]+ 1:t_sim,
+               block_sim[1:t_sim,] %>% mutate(type = 'true') ) #time=lib[2]+ 1:t_sim,
+  )
+} # sim_EDM_smap
+```
+
+We now revisit the question of mechanistic predictions of DO. As described above, W=when DO is included as a possible predictor, the the month-to-month forecast skill is very high. Thus, to identify a robust set of drivers for EDM, we examine forecast skill over a longer time-horizon using the newly defined iterative predictor. However, this calculation is computationally intensive so we can always load the results from archived output.
+
+
+```{r}
+fname.DO_sim_tp <- "./OUTPUTS/mEDM_DO_sim_tp.Rdata"
+
+if(!file.exists(fname.DO_sim_tp)){
+dates_IS <- c("1976-05-08","2012-02-01")
+
+L_models <- list( 
+     # M1: Figure 1 best model PLUS oxydeep
+    c('PO4_epi','PO4_lake','h_mix_model','T_surf_model','T_air','rhone','chl','oxydeep'), 
+    # M2: M1 without exogenous physical variables (rho, T_air)
+    c('PO4_epi','PO4_lake','h_mix_model','T_surf_model','chl','oxydeep'),
+    # M3: M2 without SRP_lake
+    c('PO4_lake','h_mix_model','T_surf_model','chl','oxydeep'),
+    # M4: M2 without CHL
+    c('PO4_epi','PO4_lake','h_mix_model','T_surf_model','oxydeep'),
+    # M5: M2 without PO4_epi
+    c('PO4_lake','h_mix_model','T_surf_model','chl','oxydeep')
+    )
+
+phys_vars <- c("T_surf","h_mix","wind_speed","T_air","rhone","T_surf_model","h_mix_model")
+tp_max <- 12
+
+theta_list <- c(0, 1e-04, 3e-04, 0.001, 0.003, 0.01, 0.03, 0.1, 0.3, 0.5,
+  0.75, 1, 1.5, 2, 3, 4, 6, 8)
+
+lake_geneva_sim <- data_lake_geneva %>%
+    rename(time=date) %>%
+    # mutate(oxydeep_delta = c(NA,diff(oxydeep))) %>%
+    mutate_at(vars(phys_vars),funs(lead(.,1))) %>%
+    filter(complete.cases(.)) %>%
+    filter(time >= dates_IS[1] & time <= dates_IS[2])
+
+I_start_points <- 1:( NROW(lake_geneva_sim) - tp_max)
+
+results_sim_tp_smap <- map_df(L_models,function(L_model_i){
+    
+    block_model_i <- lake_geneva_sim[,c('time',L_model_i)]
+    
+    results_sim <- map_df(I_start_points,function(i_start){
+        
+        block_sim_i <- block_model_i[i_start + 0:tp_max,]
+        
+        out_sim_i <- sim_EDM_smap_diff(block_model_i,
+                                       block_sim_i,
+                                       tp_max,
+                                       tp = 1,
+                                       # num_neighbors = max(map_dbl(L_models,length)) + 1,
+                                       lib_train = c(1,NROW(block_model_i)),
+                                       pred_sim = c(1,NROW(block_model_i)),
+                                       sim_col = 'oxydeep', # could set to which columns are NAs
+                                       theta = theta_list ,
+                                       exclusion_radius = 90
+                                       ) %>%
+            rename(date=time) %>%
+            group_by(type) %>%
+            mutate(tp=row_number()-1) %>%
+            ungroup()
+    }
+    
+    )
+    
+    results_sim_oxy <- full_join( results_sim %>%
+                                      filter(type=='sim') %>%
+                                      select(date,tp,oxydeep) %>%
+                                      rename(pred=oxydeep) ,
+                                  results_sim %>%
+                                      filter(type=='true') %>%
+                                      select(date,tp,oxydeep) %>%
+                                      rename(obs=oxydeep),
+                                  by = c("date","tp")) %>%
+     mutate(embedding=label_embeddings_parsable(paste(1:length(L_model_i),collapse=","),
+                                                   L_model_i,
+                                                   dictionary = dictionary_expressions) %>% as.factor())
+    
+}) # map(L_models_)
+
+save(results_sim_tp_smap,file=fname.DO_sim_tp)
+}else{
+  load(fname.DO_sim_tp)
+}
+
+results_sim_tp_smap %>%
+    filter(tp <= 12) %>%
+    group_by(tp,embedding) %>%
+    summarise(stats=compute_stats(obs,pred) %>% list()) %>%
+    mutate(embedding = str_replace_all(embedding,"_model","")) %>%
+    unnest(stats) %>%
+    ggplot(aes(x=tp,y=rho)) + geom_line(aes(color=embedding),lwd=1) +
+    scale_x_continuous(breaks=c(0,3,6,9,12),minor_breaks = 0:12) +
+    labs(x='Prediction Time (months)',y='Forecast Skill (\u03C1)',color=NULL) +
+    theme_bw() + theme(legend.position = "bottom") +
+    scale_color_viridis_d(labels= f_q_exp) +
+    guides(color=guide_legend(ncol=1,title=NULL))
+```
+
+We then explore the behavior of these 6-month forecasts across summer conditions. As mentioned above we use the simplex predictor instead of S-maps for computational efficiency. These results are used for Figure 3. First we write a function.
+
+```{r}
+EDM_DO_module <- function(block_observed,block_scenario,time_0,DO_0,dt=6){
+  
+  L_model <- c('PO4_lake','PO4_epi','h_mix_model','T_surf_model','oxydeep','chl')
+  
+  tp_max <- dt
+  month_start <- month(time_0)
+  
+  i_start <- which.min(abs(block_scenario$date - time_0))
+  
+  # i_start <- which(year(block_scenario$date) == year(time_0) & month(block_scenario$date) == month(time_0))
+  
+  block_sim_i <- block_scenario[i_start + 0:tp_max,]
+  block_sim_i[1,'oxydeep'] <- as.numeric(DO_0)
+  
+  out_sim_i <-  sim_EDM_simplex_diff(block_train = block_observed %>% rename(time=date),
+                                     block_sim = block_sim_i %>% rename(time=date),
+                                     t_sim = tp_max,
+                                     # num_neighbors = 4,
+                                     tp = 1,
+                                     lib_train = c(1,NROW(block_observed)),
+                                     pred_sim = c(1,NROW(block_sim_i)),
+                                     sim_col = 'oxydeep', # could set to which columns are NAs
+                                     predictor_col=L_model,
+                                     exclusion_radius = 0) %>%
+    filter(type=="sim") %>%
+    tail(1)
+  
+  DO_1 <- out_sim_i$oxydeep 
+  
+  return(DO_1)
+}
+```
+
+```{r,EVAL=FALSE}
+ # I_start_points <- 1:( NROW(block_model) - tp_max)
+ #   I_start_points <- which(month(block_model$date) == 5)
+ #   
+ #   results_sim <- map_df(I_start_points,function(i_start){
+ #   
+ #   EDM_DO_module(block_observed,block_scenario,time_0,DO_0,dt=6)
+ #   
+   # }
+# load("./Figures/RESULTS_figure_3.Rdata",envir=E_fig3)
+
+```
+
+
+## Hybrid Modeling
+
+```{r}
+oxysat = 13 # oxygen saturation at 5∞C [mg/L]
+cr_dm = 250 # critical depth of mixed layer to consider lake as undergoing complete mixing
+oxyR=10
+g = 9.81
+alpha = 100e-6
+Vbot = 1.4e10
+H = 310 - cr_dm
+# time_hybrid[1,] = c(1981,5,1,0,0,0);
+time_hybrid_0 <- ymd("1981-5-1")
+```
+
+```{r}
+Simstrat_physics_inital <- function(run = FALSE,
+                                    file.output = './OUTPUTS/LAKEGENEVA/T_out.dat',
+                                    file.params = "./Inputs/simstrat_LakeGeneva_Deep_Mixing.par"){
+  
+  
+  
+  # INPUTS: Simstrat parameter file name
+  # OUTPUT: list, [1] "mixing"
+  if(run){
+    system(paste("simstrat_windows_301.exe",file.params))
+  }
+  
+  Output_Simstrat_T <- read.csv(file.output,header = FALSE)
+  
+  time_mo <- ymd_h("1981-1-1-0") + hours(Output_Simstrat_T[-1,1]*24)
+  time_model_1d = seq(round(first(time_mo),"days"),round(last(time_mo),"days"),by="day");
+  # time_mo <- as.Date(Output_Simstrat_T[-1,1],origin="1980-1-1-0-0-0",tz="UTC")
+  
+  z <- -as.numeric(Output_Simstrat_T[1, -1])
+  dz <- -diff(z);
+  Temp <- as.matrix(Output_Simstrat_T[-1,-1])
+  
+  zdeep <- numeric(length(time_mo))
+  Tsurf <-numeric(length(time_mo))
+  
+  ## Extraction of surface temperature and thermocline depth
+  for(k in 1:length(time_mo)){
+    dT <- diff(Temp[k,])
+    n2 <- g*alpha*dT/dz 
+    # [val,ind] = max(n2(1:end));
+    ind <- which.max(n2)
+    zdeep[k]=z[last(ind)] # thermocline depth estimated based on the max of stratification
+    Tsurf[k] = Temp[k,NCOL(Temp)]
+  }
+  
+  
+  # Down-sample (with linear interpolation if slight mismatches) to 1 day.
+  zdeep <- approx(x=time_mo,y=zdeep,xout = time_model_1d)$y
+  T_surf <- approx(x=time_mo,y=Tsurf,xout = time_model_1d)$y
+  
+  h_mix = round(zdeep); # daily mixed-layer depth
+  
+  return(data.frame(time=time_model_1d,h_mix=h_mix,T_surf=T_surf))
+  
+}
+
+hybrid_model_v1 <- function(
+  block_observed,
+  block_scenario = block_observed, # for historical the scenario is the same as observed
+  # t0=c(1981,5,1,0,0,0),
+  t0="1981-5-15",    # a "yyyy-mm-dd" string or POSIX date
+  DO_0=9.8958,
+  n_steps=70,
+  dt=6              # in months
+){
+  if(is.character(t0)){
+    t0 = ymd(t0)
+  }
+
+  df_hybrid_out <- data.frame(time = seq(t0,by=paste(dt,"months"),length.out = n_steps),
+                              oxydeep = NA)
+  df_hybrid_out$oxydeep[1] = DO_0
+  
+  # Perform initializing run of Simstrat to get lake physics over model duration
+  Simstrat_out <- Simstrat_physics_inital()
+  load(file= "./INPUTS/Q_rhone.Rdata")
+  
+  Rhone <- approx(x=Rhone$time,y=Rhone$Q,xout=Simstrat_out$time,method="linear",rule=2) %>%
+    data.frame() %>% rename(time=x,Q_rhone=y)
+  
+  k=1
+  
+  while(k<n_steps){
+    k=k+1
+    
+    time_k = df_hybrid_out$time[k-1] # time at start of interval k
+    month = month(time_k)
+    yy = year(time_k)
+    
+    # time_hybrid(k,:) = ([1981,5+6*(k-1),1,0,0,0]);  
+    # month = time_hybrid(k,2); 
+    
+    # DO_k_0 = round(df_hybrid_out$oxydeep[k-1],1); #initial DO in kth interval
+    DO_k_0 = df_hybrid_out$oxydeep[k-1]
+    
+    # # check if model interval is over summer
+    if(month %in% 5:10){
+      # generate block_scenario
+      # load(paste0('scenario.C_T=0.PO4_lake=',num2str(TP),'.Rdata'))
+
+      # run EDM module
+      DO_k <- EDM_DO_module(time_0=time_k,
+                            block_observed=block_observed,
+                            block_scenario=block_scenario,
+                            DO_0=DO_k_0,
+                            dt=dt)
+
+      df_hybrid_out$oxydeep[k] = DO_k
+
+    }else{
+
+    # {
+      # if the model is over winter, invoke parametric relationships described in Schwefel et al. for 2-box oxygen model
+      
+      # check maximum h_mix over interval
+      # I_year <- which(year(Simstrat_out$time) == yy);
+      
+      # deep_mixing = Simstrat_out %>%
+      #   filter(time >= time_k, time <= time_k + months(dt)) %>%
+      #   pull(h_mix) %>%
+      #   max()
+      
+      deep_mixing <- block_scenario %>%
+        filter(date >= time_k, date <= time_k + months(dt)) %>%
+        pull(h_mix_model) %>%
+        max()
+      
+      # deep_mixing = max(Simstrat_out$h_mix[I_year]);
+      
+      if(deep_mixing < cr_dm){
+        # run EDM module over winter period without complete mixing
+
+        DO_k <- EDM_DO_module(time_0=time_k-months(dt),
+                              block_observed=block_observed,
+                              block_scenario=block_scenario,
+                              DO_0=DO_k_0,
+                              dt=dt)
+        
+        # account for Rhone river inputs when there is no mixing mixing using parametric structure
+        
+        # intQ = Rhone %>%
+        #   filter(time >= time_k, time <= time_k + months(dt)) %>%
+        #   pull(Q_rhone)
+        # Qtot = mean(intQ)*length(intQ)*86400; # multiply integrated flux by elapsed time in seconds
+        # DO_k = Qtot/Vbot*oxyR +(Vbot-Qtot)/Vbot*DO_k;
+        
+        df_hybrid_out$oxydeep[k]=DO_k;
+        
+      }else{
+        h1 = deep_mixing-cr_dm;
+        h2 = 310-deep_mixing;
+        # val = round(h1/H*oxysat + h2/H*DO_k_0,1); 
+        DO_k = h1/H*oxysat + h2/H*DO_k_0
+
+        DO_k =  EDM_DO_module(time_0=time_k-months(dt),
+                              block_observed=block_observed,
+                              block_scenario=block_scenario,
+                              DO_0=DO_k,
+                              dt=dt)
+
+        df_hybrid_out$oxydeep[k] = DO_k
+      }
+      
+    }
+    
+    if(df_hybrid_out$oxydeep[k] < 0){
+      df_hybrid_out$oxydeep[k] = 0
+    }
+    
+  } # while(k)
+  
+  return(df_hybrid_out)
+}
+```
+
+### Historical
+
+
+These results are used for Figure 4a
+
+```{r,cache=TRUE}
+E_fig4 <- new.env()
+
+load("./INPUTS/EDM_input_data.Rdata")
+
+block_in <- data_lake_geneva %>%
+  # mutate(oxydeep = replace(oxydeep,h_mix_model > 250,NA)) %>%
+  mutate_at(c('h_mix_model','T_surf_model'),funs(lead(.,1))) %>%
+  filter(date > ymd("1981-01-01"))
+
+
+block_sim <- data_lake_geneva %>%
+  mutate(year_sine=sin(2*pi*yday(date)/365)) %>%
+  mutate(year_cosine=cos(2*pi*yday(date)/365)) %>%
+  select(names(block_in)) %>%
+  filter(date > ymd("1981-01-01"))
+
+# run chl model with scenario forcing and replace in block_sim
+L_model_chl <- c('T_surf_model','PO4_lake','year_sine')
+
+# sim_EDM_simplex
+out_sim_chl <- sim_EDM_smap(block_sim %>% rename(time=date),
+                            block_sim %>% rename(time=date),
+                            NROW(block_sim),
+                            tp = 1,
+                            lib_train = c(1,NROW(block_sim)),
+                            pred_sim = c(1,NROW(block_sim)),
+                            sim_col = "chl",
+                            predictor_col=L_model_chl,
+                            theta = c(0,.1,.5,1,2,3,4,5,6,7,8),
+                            exclusion_radius = 0) %>%
+  rename(date=time) %>%
+  filter(type=='sim') %>%
+  select(date,chl)
+
+block_sim <- left_join(block_sim %>% select(-chl),
+                       out_sim_chl,by="date") %>%
+  select(names(block_in))
+
+# run PO4_epi with scenario forcing and replace in block_sim
+L_model_PO4_epi <- c('T_surf_model','PO4_lake','year_sine','PO4_epi')
+
+out_sim_PO4_epi <- sim_EDM_smap(block_sim %>% rename(time=date),
+                                block_sim %>% rename(time=date),
+                                NROW(block_sim),
+                                tp = 1,
+                                lib_train = c(1,NROW(block_sim)),
+                                pred_sim = c(1,NROW(block_sim)),
+                                sim_col = "PO4_epi",
+                                predictor_col=L_model_PO4_epi,
+                                theta = c(0,.1,.5,1,2,3,4,5,6,7,8),
+                                exclusion_radius = 0) %>%
+  rename(date=time) %>%
+  filter(type=='sim') %>%
+  select(date,PO4_epi)
+
+block_sim <- left_join(block_sim %>% select(-PO4_epi),
+                       out_sim_PO4_epi,by="date") %>%
+  select(names(block_in))
+
+# adjust time index of physical drivers so current values are used for prediction rather than 1-step lags.
+
+block_sim <- block_sim[,names(block_in)] %>%
+  mutate_at(c('h_mix_model','T_surf_model'),funs(lead(.,1))) %>%
+  filter(row_number() > 1)
+
+temp = hybrid_model_v1(block_observed = block_in,block_scenario = block_sim,n_steps=72,dt=6)
+
+E_fig4$df_hybrid <- temp %>% mutate(year = year(time),month = month(time), day = day(time)) %>% select(year,month,day,oxydeep) %>% mutate(data="Hybrid")
+```
+
+
+
+```{r}
+E_fig4$df_Robert <- read_delim('./OUTPUTS/Robert_model_final_results_may2020.csv',delim=',',comment="#") %>%
+  set_names(nm=c("year","month","day","oxydeep")) %>% mutate(data="Parametric")
+E_fig4$df_obs <- read_delim('./OUTPUTS/observations_final_results_may2020.csv',delim=',',comment="#") %>%
+  set_names(nm=c("year","month","day","oxydeep")) %>% mutate(data="Observed")
+
+E_fig4$df_plot <- bind_rows(E_fig4$df_Robert,E_fig4$df_obs,E_fig4$df_hybrid) %>%
+  mutate(data=factor(data,levels=c("Observed","Parametric","Hybrid"))) %>%
+  mutate(date = ymd(paste(year,month,day,sep="-")))
+
+E_fig4$date_limits <- range(E_fig4$df_plot %>% filter(data=="Observed") %>% pull(date))
+
+E_fig4$data_types <- unique(E_fig4$df_plot$data) %>% as.character()
+
+g_4_A <- with(E_fig4,
+              df_plot %>%
+                pivot_wider(names_from=data,values_from=oxydeep) %>%
+                filter(complete.cases(.)) %>%
+                pivot_longer(cols=any_of(data_types),names_to="data",values_to="oxydeep") %>%
+                ggplot(aes(x=date,y=oxydeep,color=data)) + geom_line() +
+                xlim(date_limits) +
+                theme_bw() +
+                labs(x="Date",y="DO (mg/L)",color=NULL)
+)
+
+print(g_4_A)
+
+df_4a <- with(E_fig4,
+              df_plot %>%
+                pivot_wider(names_from=data,values_from=oxydeep) %>%
+                filter(complete.cases(.)) )
+
+
+cor(df_4a$Observed,df_4a$Hybrid)
+cor(df_4a$Observed,df_4a$Parametric)
+mean(abs(df_4a$Observed-df_4a$Hybrid))
+# cairo_pdf(file = "./Figures/Figure_4A - historical prediction.pdf",width=6.5,height = 3.5)
+# print(g_4_A)
+# dev.off()
+
+```
+
+### Scenario Exploration
+
+These results are used for Figure 4c.
+
+First we import archieved runs of Simstrat for atmospheric warming scenarios. Code that integrates system calls to Simstrat execution is provided in the Github, but requires independent installation of the Simstrat software.
+
+```{r}
+Simstrat_get_warming_scenario <- function(delta_T = 0,
+                                          run=F,
+                                          initial_output_path = './OUTPUTS/LAKEGENEVA_SIMSTRAT_1_0/'
+                                          ){
+  
+  scenario_output_path = paste0(initial_output_path,"Scenario_",delta_T,"degC_warming/")
+  
+  Output_Simstrat_T <- read.csv(paste0(scenario_output_path,"T_out.dat"),header = FALSE)
+  
+  time_mo <- ymd_h("1981-1-1-0") + hours(Output_Simstrat_T[-1,1]*24)
+  time_model_1d = seq(round(first(time_mo),"days"),round(last(time_mo),"days"),by="day");
+  
+  z <- -as.numeric(Output_Simstrat_T[1, -1])
+  dz <- -diff(z);
+  Temp <- as.matrix(Output_Simstrat_T[-1,-1])
+  
+  zdeep <- numeric(length(time_mo))
+  Tsurf <-numeric(length(time_mo))
+  
+  ## Extraction of surface temperature and thermocline depth
+  for(k in 1:length(time_mo)){
+    dT <- diff(Temp[k,])
+    n2 <- g*alpha*dT/dz 
+    ind <- which.max(n2)
+    zdeep[k]=z[last(ind)] # thermocline depth estimated based on the max of stratification
+    Tsurf[k] = Temp[k,NCOL(Temp)]
+  }
+  
+  # Down-sample (with linear interpolation if slight mismatches) to 1 day.
+  zdeep <- approx(x=time_mo,y=zdeep,xout = time_model_1d)$y
+  T_surf <- approx(x=time_mo,y=Tsurf,xout = time_model_1d)$y
+  
+  h_mix = round(zdeep); # daily mixed-layer depth
+  
+  return(data.frame(time=time_model_1d,h_mix=h_mix,T_surf=T_surf))
+}
+```
+
+```{r}
+# rm(list = ls())
+
+data_scenarios_file <- "./INPUTS/EDM_input_data_scenarios.Rdata"
+
+v_T_scenarios = c(0,1,3)
+v_PO4_scenarios <- 15:60
+
+if(!file.exists(data_scenarios_file)){
+  load( "./INPUTS/EDM_input_data.Rdata")
+
+t_interp <- data_lake_geneva$date
+
+L_input_data_scenarios=vector(mode = "list",length=length(v_T_scenarios))
+
+L_input_data_scenarios[[1]] <- Simstrat_get_warming_scenario(delta_T=v_T_scenarios[1])
+L_input_data_scenarios[[2]] <- Simstrat_get_warming_scenario(delta_T=v_T_scenarios[2])
+L_input_data_scenarios[[3]] <- Simstrat_get_warming_scenario(delta_T=v_T_scenarios[3])
+
+for(i_scenario in seq(along=L_input_data_scenarios)){
+  L_input_data_scenarios[[i_scenario]] <- L_input_data_scenarios[[i_scenario]] %>%
+    rename(date = time) %>%
+    mutate(date = ymd(date)) %>%
+    mutate(date = cut(date,breaks=c(min(t_interp)-days(30),t_interp),right=TRUE,labels=(t_interp)) %>% as.Date() ) %>%
+    group_by(date) %>%
+    summarise(h_mix_model = max(h_mix,na.rm=T), T_surf_model = mean(T_surf,na.rm=T))
+  
+  L_input_data_scenarios[[i_scenario]] <- full_join(
+    data_lake_geneva %>% select(!ends_with("_model")),
+    L_input_data_scenarios[[i_scenario]],
+    by = "date"
+  )
+}
+
+save(L_input_data_scenarios,file=data_scenarios_file)
+}
+
+load(data_scenarios_file)
+```
+
+With the Simstrat outputs for each temperature scenario, we can now iterate through the combined temperature and nutrient scenarios, calling the hybrid model function each time.
+
+```{r,cache=TRUE}
+
+# source("./FUNCTIONS/F_EDM_analysis.R")
+# source("./FUNCTIONS/F_hybrid_model.R")
+load("./INPUTS/EDM_input_data.Rdata")
+
+v_PO4_scenarios <- seq(15,60,by=1 )
+# v_PO4_scenarios <- seq(40,46,by=1)
+
+block_model <- data_lake_geneva %>%
+  mutate(year_sine=sin(2*pi*yday(date)/365)) %>%
+  mutate(year_cosine=cos(2*pi*yday(date)/365)) %>%
+  filter(date > ymd("1981-02-01"))
+
+block_in <- data_lake_geneva %>%
+  mutate_at(c('h_mix_model','T_surf_model'),funs(lead(.,1))) %>%
+  # filter(year(date) <= 2013) %>%
+  filter(date > ymd("1981-02-01"))
+
+results_scenarios <- map_dfr(seq(along=v_T_scenarios),function(i_T) {
+  
+  map_dfr(seq(along=v_PO4_scenarios),function(i_PO4){
+
+    T_scenario <- v_T_scenarios[i_T]
+    PO4_scenario <- v_PO4_scenarios[i_PO4]
+    
+    # Generate BGC forcing data from CHL and PO4_epi S-map models
+    
+    # Begin with block that has h_mix_model and T_surf_model based on i_T
+    block_sim_i <- L_input_data_scenarios[[i_T]] %>%
+      mutate(year_sine=sin(2*pi*yday(date)/365)) %>%
+      mutate(year_cosine=cos(2*pi*yday(date)/365)) %>%
+      select(names(block_model)) %>%
+      filter(date > ymd("1981-01-01"))
+    
+    # replace PO4_lake with the scenario
+    block_sim_i$PO4_lake <- PO4_scenario
+    
+    # run chl model with scenario forcing and replace in block_sim
+    L_model_chl <- c('T_surf_model','PO4_lake','year_sine')
+    
+    # sim_EDM_simplex
+    out_sim_chl_i <- sim_EDM_smap(block_model %>% rename(time=date),
+                                  # out_sim_i <- sim_EDM_smap_diff(block_model_i,
+                                  block_sim_i %>% rename(time=date),
+                                  NROW(block_sim_i),
+                                  tp = 1,
+                                  lib_train = c(1,NROW(block_model)),
+                                  pred_sim = c(1,NROW(block_sim_i)),
+                                  sim_col = "chl",
+                                  predictor_col=L_model_chl,
+                                  theta = c(0,.1,.5,1,2,3,4,5,6,7,8),
+                                  exclusion_radius = 0) %>%
+      rename(date=time) %>%
+      filter(type=='sim') %>%
+      select(date,chl)
+    
+    block_sim_i <- left_join(block_sim_i %>% select(-chl),
+                             out_sim_chl_i,by="date") %>%
+      select(names(block_model))
+    
+    # run PO4_epi with scenario forcing and replace in block_sim
+    # L_model_PO4_epi <- c('T_surf_model','PO4_lake','year_sine')
+    L_model_PO4_epi <- c('T_surf_model','PO4_lake','year_sine','PO4_epi')
+    
+    out_sim_PO4_epi_i <- sim_EDM_smap(block_model %>% rename(time=date),
+                                      # out_sim_i <- sim_EDM_smap_diff(block_model_i,
+                                      block_sim_i %>% rename(time=date),
+                                      NROW(block_sim_i),
+                                      tp = 1,
+                                      lib_train = c(1,NROW(block_model)),
+                                      pred_sim = c(1,NROW(block_sim_i)),
+                                      sim_col = "PO4_epi", # could set to which columns are NAs
+                                      predictor_col=L_model_PO4_epi,
+                                      theta = c(0,.1,.5,1,2,3,4,5,6,7,8),
+                                      exclusion_radius = 0) %>%
+      rename(date=time) %>%
+      filter(type=='sim') %>%
+      select(date,PO4_epi)
+    
+    block_sim_i <- left_join(block_sim_i %>% select(-PO4_epi),
+                             out_sim_PO4_epi_i,by="date") %>%
+      select(names(block_model))
+    
+    # adjust time index of physical drivers so current values are used for prediction rather than 1-step lags.
+    
+    block_sim_i <- block_sim_i[,names(block_in)] %>%
+      mutate_at(c('h_mix_model','T_surf_model'),funs(lead(.,1))) %>%
+      filter(row_number() > 1)
+    
+    # run hybrid model. 
+    temp = hybrid_model_v1(block_observed = block_in,block_scenario = block_sim_i,n_steps=71,dt=6)
+    
+    return(temp %>% mutate(T_scenario=T_scenario,PO4_scenario=PO4_scenario))
+    
+    
+    
+  }) # map i_PO4
+}) # for i_T
+
+save(results_scenarios,file="./OUTPUTS/hybrid_model_scenarios.Rdata")
+```
+
+
+```{r}
+load("./OUTPUTS/hybrid_model_scenarios.Rdata")
+results_scenarios %>%
+  group_by(T_scenario,PO4_scenario) %>%
+  summarise(perc_hypox = mean(oxydeep < 4)) %>%
+  ggplot(aes(x=PO4_scenario,y=perc_hypox,color=factor(T_scenario))) + geom_point(pch=3) +
+  theme_bw() +
+  stat_smooth(method="loess",span=0.65) +
+  scale_color_manual(values=c("green","blue","red"),limits=c(0,1,3)) +
+  ylim(0,1) + xlim(0,60)
+
+```
+
+

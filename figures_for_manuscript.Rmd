@@ -1,0 +1,583 @@
+---
+title: "Lake Geneva"
+output: html_notebook
+---
+
+This markdown replicates analyses in "PNAS_SI_notebook.Rmd" to produce manicured figures for the final paper. All figures use ggplot and gridExtra.
+
+Notes on formatting from https://www.pnas.org/content/pnas/111/1/local/information-for-authors.pdf:
+
+Images must be final size, preferably one column width (8.7 cm). Figures wider than one column should be sized to 11.4 cm or 17.8 cm wide. Numbers, letters, and symbols should be no smaller than 6 points (2 mm) and no larger than 12 points (6 mm) after reduc-tion  and  must  be  consistent.  Composite  figures  must  be  preas-sembled. Figures must be submitted as separate files, not embed-ded in manuscript text. See the Digital Art Guidelines or contact pnas_specialist.djs@sheridan.com.
+
+```{r packages}
+library(tidyverse)
+library(lubridate)
+library(rEDM,lib.loc = "./lib")
+
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(ggsci)
+
+source('./FUNCTIONS/F_data_and_plots.R')
+```
+
+
+```{r}
+data_file <- "./INPUTS/EDM_input_data.Rdata"
+load(data_file)
+```
+
+
+## Figure 1 Data & Causes
+
+The current modeling paradigm incorporates phosphorous changes only indirectly, as integrated into the historical chlorophyll time series. This is only sufficient if there is no complex relationship between phosphorous and chlorophyll!
+
+CCM and 1-step ahead multivariate forecasting confirm the fundamental role that phosphorous plays in the system, both to chlorophyll and deep oxygen. Importantly, the effect of phosphorous cannot be accounted for simply by including chlorophyll.
+
+Ingredients:
+
+(A) Time series of dissolved oxygen at depth.
+(B) Time series of total phosphorous.
+(C) Time series of chlorophyll-a.
+(D) Multivariate EDM analysis demonstrates the importance of explicitly accounting for phosphorous to understanding dissolved oxygen dynamics. Note that simply including indirect information about phosphorous via chlorophyll or primary production is not sufficient to explain behavior (magenta line).
+
+```{r Fig_1_ABC time series}
+variables_to_plot <- list("oxydeep","Ptotal_lake","chl")
+
+dates_deep_mixing <-ymd( c("1972-01-22",
+                          "1981-02-15",
+                          "1984-03-13",
+                          "1986-04-18",
+                          "1999-02-01", # point before original point given by damien
+                          # "1999-03-07", # original point given by damien, but is a local minimum
+                          "2005-03-07",
+                          "2006-03-31",
+                          "2012-02-01") )
+
+DO_limits <- c(0,12.5)
+
+df_mixing_arrows <- data.frame(x=dates_deep_mixing,
+                                         xend=dates_deep_mixing,
+                                         y_DO=12,
+                                         y_DOend=11)
+
+# Panel A: DO_b50m with deep mixing
+g_1_A <- data_lake_geneva %>%
+    ggplot(aes(x=date,y=oxydeep)) + geom_line(color=L_colors['oxydeep']) + 
+    geom_segment(mapping = aes(x=x,xend=xend,y=y_DO,yend=y_DOend),
+                 data = df_mixing_arrows,
+                 arrow = arrow(length=unit(3,"points"))) + 
+    labs(y=L_dict_plotting_long['oxydeep'],x="") + theme_bw() +
+    theme(axis.title.x = element_text(size=9),axis.title.y = element_text(size=9))
+
+# Panel B: Ptot_lake
+g_1_B <- data_lake_geneva %>%
+    ggplot(aes(x=date,y=Ptot_lake)) + geom_line(aes(color="Ptot_lake")) +
+    geom_line(aes(y=Ptot_epi,color="Ptot_epi")) +
+    scale_color_manual(values=c(L_colors['Ptot_lake'],L_colors['Ptot_epi']),
+                       labels=c("Ptot_lake"="Lake Avg","Ptot_epi"="Epilimnion")) + 
+    labs(y=L_dict_plotting_long['Ptot_both'],x="",color=NULL)  + 
+    theme_bw() + 
+    theme(legend.position = c(.95,.95),
+          legend.margin = margin(0.01,0.05,0.01,0.05,"cm"),
+          legend.spacing.x = unit(0.01,"cm"),
+          legend.justification = c(1,1),
+          legend.background = element_rect(color = "black")) +
+    theme(axis.title.x = element_text(size=9),axis.title.y = element_text(size=9))
+
+
+# Panel C: chl
+g_1_C <- data_lake_geneva %>%
+    ggplot(aes(x=date,y=sqrt(chl))) + geom_line(color=L_colors['chl']) +
+    geom_line(data = {data_lake_geneva %>%
+                  mutate(chl_mean = stats::filter(chl,rep(1,12)/12,method="convolution"))},
+              aes(y=sqrt(chl_mean)),color='grey20',lty="dotted") +
+    labs(y=L_dict_plotting_long['chl'],x="Year")  + theme_bw() +
+    theme(axis.title.x = element_text(size=9),axis.title.y = element_text(size=9))
+
+
+g_1_ABC <- grid.arrange(g_1_A,g_1_B,g_1_C,ncol=1,bottom="Year")
+```
+
+### Figure 1 D
+
+Lines:
+- Physics first
+- Physics + chlorophyll
+- Physics + chlorophyll + PO4_epi
+- Physics + chlorophyll + PO4_lake
+- Physics + chlorophyll + PO4_epi + PO4_lake
+
+```{r Fig_1_D }
+
+E_fig1_D <- new.env()
+load("./Figures/RESULTS_figure_1D.Rdata",E_fig1_D)
+
+f_q_exp <- function(breaks) { parse(text=breaks)}
+
+label_list <- map(unique(RESULTS_figure_1D$embedding),~ bquote(.))
+
+g_1_D <- with(E_fig1_D,{ RESULTS_figure_1D %>% 
+    mutate(embedding = factor(embedding,
+                              levels = unique(embedding)[rank(str_count( unique(embedding),","),ties.method = 'first')])) %>%
+    # mutate(embedding=as.expression(embedding)) %>%
+    ggplot(aes(x=theta,y=rho,color=embedding)) + geom_line(lwd=1) + 
+    scale_color_viridis_d(labels= f_q_exp) +
+        # scale_color_viridis_d()+
+    labs(x='Nonlinearity (\u03B8)',y='Forecast Skill (\u03C1)',color=NULL) + theme_bw() + theme(legend.position = "bottom",legend.text=element_text(size=7,hjust=0)) + guides(color=guide_legend(nrow=5,byrow=TRUE))
+})
+
+# print(g_1_D)
+```
+
+```{r}
+cairo_pdf(file = "./Figures/Figure_1 - Overview.pdf",width=7,height = 5)
+grid.arrange(g_1_A + theme(plot.margin = unit(c(.1,.2,.1,.1),"in")),
+             g_1_B + theme(plot.margin = unit(c(.1,.2,.1,.1),"in")),
+             g_1_C + theme(plot.margin = unit(c(.1,.2,.1,.1),"in")),
+             g_1_D + theme(plot.margin = unit(c(.1,.1,.25,.1),"in")),
+             layout_matrix=rbind( matrix(c(1,1,1,4,4),nrow=1,ncol=5),
+                                      matrix(c(2,2,2,4,4),nrow=1,ncol=5),
+                                      matrix(c(3,3,3,4,4),nrow=1,ncol=5) )
+             )
+dev.off()
+```
+
+## Figure 2 State-dependent Interactions
+
+Further EDM analysis to investigate the relationship between chlorophyll and phosphorous and identifying a strongly state-dependent relationship.
+
+Figure 2a. dCHL/dTP = f(TP)
+Figure 2b. dDO/dCHL = f(TP) ( I would change the sign for DO as people usually look at a depletion rate)
+
+
+With validated EDM models we can look at the evolving strength of influence of the driving variables by calculating S-map coefficients (Sugihara 1994, Deyle et al. 2016).
+
+```{r}
+E_fig2_A <- new.env(parent=E_fig2)
+E_fig2_B <- new.env(parent=E_fig2)
+load("./Figures/RESULTS_figure_2A.Rdata",env=E_fig2_A)
+
+g_2_A <- with(E_fig2_A, {
+    bind_cols(block_chl_mEDM_raw,out_s_map_coeff) %>%
+        # bind_cols(lake_geneva_interp[,c('date',union(L_model_i,sim_col))],out_s_map_coeff) %>%
+        mutate(year = year(date)) %>%
+        group_by(year) %>%
+        summarise_at(vars(starts_with("c_"),PO4_lake),funs(mean,median)) %>%
+        ggplot(aes(x=PO4_lake_median,y=c_PO4_lake_median)) + geom_point() + 
+        geom_hline(yintercept = 0,lty=2,color="tomato") + 
+        stat_smooth() +
+        labs(title="Median Annual Effect\nof TP on Chl",x="TP (\u03BCg/L)",y="\u2202 Chl / \u2202 TP") +
+        theme_bw()
+})
+
+load("./Figures/RESULTS_figure_2B.Rdata",env=E_fig2_B)
+
+g_2_B <- with(E_fig2_B,{
+
+    bind_cols(lake_geneva_interp,out_s_map_coeff) %>%
+        filter(month(date) %in% 5:10) %>%
+        # bind_cols(lake_geneva_interp[,c('date',union(L_model_i,sim_col))],out_s_map_coeff) %>%
+        mutate(year = year(date)) %>%
+        group_by(year) %>%
+        summarise_at(vars(starts_with("c_"),PO4_lake),funs(mean,median)) %>%
+        ggplot(aes(x=PO4_lake_median,y=c_chl_median)) + geom_point() + 
+        geom_hline(yintercept = 0,lty=2,color="tomato") + 
+        stat_smooth() +
+        labs(title = "Median May-Oct Effect\nof Chl on Bottom DO",x="TP (\u03BCg/L)",y="\u2202 DO / \u2202 Chl") +
+        theme_bw()
+    
+})
+
+cairo_pdf(file = "./Figures/Figure_2 - State dependent effects.pdf",width=3.4252)
+grid.arrange(g_2_A,g_2_B,nrow=2)
+dev.off()
+
+```
+
+
+## Figure 3
+
+"We first explore how DOdeep evolves over 6 months after deep mixing events (Figure 3a) under different reoligotrophication (e.g. change in TP  to  a given concentration) and climate change (e.g. increase in air temperature). Results from EDM experiments show high depletion rate for high background TP and warmer background air temperature."
+
+"We can already draw important management conclusion (Figure 3b). For instance we can estimate the time it takes for DOdeep to reach 4 mg/L (by law target for Swiss lakes) after a deep mixing event by merging all scenario."
+
+Label as "oxygen depletion". Make sure that units are mg/L/day. (Use "-" of S-map coeff; check that we have converted back to raw units; may need to divide by 180).
+
+```{r}
+E_fig3 <- new.env()
+load("./Figures/RESULTS_figure_3.Rdata",envir=E_fig3)
+
+C_convert <- as.numeric( mean(diff(data_lake_geneva$date))*E_fig3$tp_max )  # convert to mg/L/day
+
+dict_fig_3 <- as_labeller( 
+    c("4.5"="No Mixing\nDO(May) = 4.5 mg/L",
+      "6"="Partial Mixing\nDO(May) = 6.0 mg/L",
+      "7.5"="Full Mixing\nDO(May) = 7.5 mg/L")
+)
+
+g_3_A <- with(E_fig3,
+              {
+                  results_oxydeep_scen_exp %>% filter(oxydeep_0 != 3) %>%
+                  # results_oxydeep_scen_exp %>% filter(oxydeep_0 == 4.5) %>%
+                      mutate(T_scenario = as.factor(T_scenario)) %>%
+                      mutate(T_scenario = paste0("+",T_scenario)) %>%
+                      mutate(delta_oxydeep= delta_oxydeep / C_convert) %>%
+                      ggplot(aes(color=as.factor(T_scenario),y=delta_oxydeep,x=PO4_scenario)) +
+                      geom_point(alpha=.3,shape = "+") + stat_smooth(method = 'loess',span=0.4) +
+                      # geom_point(alpha=.3,shape = "+") + stat_smooth(method = 'gam') +
+                      xlim(c(15,60)) +
+                      theme_bw() +
+                      facet_wrap(~oxydeep_0,labeller = dict_fig_3) +
+                      # facet_wrap(~oxydeep_0) + 
+                      # theme(strip.background = element_blank(),
+                      #       # strip.text = "May DOdeep (mg/L)",
+                      #       strip.placement = "outside") +
+                      labs(color="Air Temperature\nScenario (ºC)",
+                           x="TP Scenario (\u03BCg/L)",
+                           y="Rate of Oxygen Change (mg/L/day)")
+
+              })
+
+
+print(g_3_A)
+
+cairo_pdf(file = "./Figures/Figure_3A - Summer Oxygen Depletion.pdf",width=7,height = 5)
+tg_title <- textGrob("Seasonally stratified deep oxygen depletion", gp=gpar(fontsize=20))
+tg_facetaxis <- textGrob("May DOdeep (mg/L)", gp=gpar(fontsize=15)) #, fontface=3L))
+margin <- unit(0.5, "line")
+grid.newpage()
+grid.arrange(tg_title, tg_facetaxis, g_3_A, 
+             heights = unit.c(grobHeight(tg_title) + 1.2*margin, 
+                              grobHeight(tg_facetaxis) + margin, 
+                              unit(1,"null")))
+dev.off()
+```
+
+
+## Figure 4
+
+Hybrid model predictions of (A) historical conditions, (B) TP x Tair scenarios of nutrients and temperature.
+
+
+```{r READ hybrid outputs of historical conditions}
+E_fig4$df_Robert <- read_delim('./outputs/Robert_model_final_results_may2020.csv',delim=',',comment="#") %>%
+  set_names(nm=c("year","month","day","oxydeep")) %>% mutate(data="Parametric")
+E_fig4$df_obs <- read_delim('./outputs/observations_final_results_may2020.csv',delim=',',comment="#") %>%
+  set_names(nm=c("year","month","day","oxydeep")) %>% mutate(data="Observed")
+
+E_fig4$df_hybrid <- temp %>% mutate(year = year(time),month = month(time), day = day(time)) %>% select(year,month,day,oxydeep) %>% mutate(data="Hybrid")
+
+
+E_fig4$df_plot <- bind_rows(E_fig4$df_Robert,E_fig4$df_obs,E_fig4$df_hybrid) %>%
+  mutate(data=factor(data,levels=c("Observed","Parametric","Hybrid"))) %>%
+  mutate(date = ymd(paste(year,month,day,sep="-")))
+
+E_fig4$date_limits <- range(E_fig4$df_plot %>% filter(data=="Observed") %>% pull(date))
+
+E_fig4$data_types <- unique(E_fig4$df_plot$data) %>% as.character()
+
+g_4_A <- with(E_fig4,
+              df_plot %>%
+                pivot_wider(names_from=data,values_from=oxydeep) %>%
+                filter(complete.cases(.)) %>%
+                pivot_longer(cols=any_of(data_types),names_to="data",values_to="oxydeep") %>%
+                ggplot(aes(x=date,y=oxydeep,color=data)) + geom_line() +
+                xlim(date_limits) +
+                theme_bw() +
+                labs(x="Date",y="DO (mg/L)",color=NULL)
+)
+
+print(g_4_A)
+
+df_4a <- with(E_fig4,
+              df_plot %>%
+                pivot_wider(names_from=data,values_from=oxydeep) %>%
+                filter(complete.cases(.)) )
+
+
+cor(df_4a$Observed,df_4a$Hybrid)
+cor(df_4a$Observed,df_4a$Parametric)
+mean(abs(df_4a$Observed-df_4a$Hybrid))
+# cairo_pdf(file = "./Figures/Figure_4A - historical prediction.pdf",width=6.5,height = 3.5)
+# print(g_4_A)
+# dev.off()
+
+
+```
+
+
+```{r READ hybrid outputs of 3x3 scenarios}
+temp <- read_delim('./output/results_parametric_model.csv',delim=';')
+```
+
+
+```{r}
+df_hybrid <- read.csv("./output/hybrid_model_dec2019.csv",sep=";",comment.char = "",check.names = F) %>%
+    mutate(date = ymd(paste(yyyy,mm,dd,sep="-"))) %>%
+    select(date,starts_with("DO"))
+
+name_df_hybrid <- names(df_hybrid)[2]
+names(df_hybrid)[2] <- "oxydeep"
+
+df_hybrid <- df_hybrid %>%
+    mutate(type="Predicted") %>%
+    mutate(oxydeep=lead(oxydeep,1))
+
+df_plot_A <- bind_rows(
+    data_lake_geneva %>%
+        select(date,oxydeep) %>%
+        filter(complete.cases(.)) %>%
+        mutate(type="Observed"),
+    df_hybrid
+)
+
+panel_A <- df_plot_A %>%
+    ggplot(aes(x=date,y=oxydeep,color=type)) + 
+    geom_line() +
+    theme_bw() +
+    labs(x="Date",y="DO (mg/L)",color=NULL) + 
+    xlim(min(df_hybrid$date),max(df_hybrid$date)) +
+    scale_color_manual(values=c("Predicted"="red1","Observed"="blue1")) +
+    theme(legend.position = c(.95,.05),legend.justification = c(1,0))
+    
+nearest_date <- function(date_i,dates_to_match){
+    i <- which.min(abs(date_i-dates_to_match))[1]
+    # i <- which.min(date_i-dates_to_match)[1]
+    dates_to_match[i]
+}
+
+df_plot_B <- left_join(
+    df_plot_A %>%
+        select(date,oxydeep) %>%
+        filter(complete.cases(.)) %>%
+        rename(Observed=oxydeep),
+    df_hybrid %>%
+        rowwise() %>%
+        mutate(date = nearest_date(date,data_lake_geneva$date)) %>%
+        rename(Predicted=oxydeep)
+)
+    
+df_plot_B %>%
+    ggplot(aes(x=Observed,y=Predicted)) + 
+    geom_point() +
+    stat_smooth(method = "lm")+
+    geom_abline(aes(slope=1,intercept=0),lty=2,color="grey60") +
+    theme_bw() +
+    labs(x="Observed DO (mg/L)",y="Predicted DO (mg/L)") +
+    coord_equal()
+    # xlim(min(df_hybrid$date),max(df_hybrid$date)) +
+    # scale_color_manual(values=c("Predicted"="red1","Observed"="blue1")) +
+    # theme(legend.position = c(.95,.05),legend.justification = c(1,0))
+
+
+df_plot_B %>%
+    filter(complete.cases(.)) %>%
+    ggplot(aes(x=date)) + 
+    geom_line(aes(y=Observed,color="Observed")) +
+    geom_line(aes(y=Predicted,color="Predicted")) +
+    theme_bw() +
+    labs(x="Date",y="DO (mg/L)")
+```
+
+## Table S1:
+
+```{r}
+E_table_S1 <- new.env()
+load("./OUTPUTS/outputs_CCM.Rdata",envir=E_table_S1)
+```
+
+```{r CREATE Table S1}
+df_dict_CCM <- bind_rows(df_dict_plotting,data.frame(data_file="h_mix_model",plotting_long="",plotting_short="h_mix MODEL"))
+                         
+t_S1A <- E_table_S1$out.CCM_DO_delta %>%
+    filter(target_column!="oxydeep") %>%
+    filter(target_column %in% pull(df_dict_CCM,data_file)) %>%
+    left_join(df_dict_CCM,by=c("target_column"="data_file")) %>%
+    # select(target_column,tp,rho,mae,rmse) %>%
+    select(plotting_short,num_pred,rho) %>%
+    mutate(rho=signif(rho,digits=3)) %>%
+    arrange(-rho) %>%
+    rename(Driver=plotting_short,`Cross-map skill ()`=rho)
+
+
+t_S1B <- E_table_S1$out.CCM_DO_raw %>%
+    filter(target_column!="oxydeep") %>%
+    filter(target_column %in% pull(df_dict_CCM,data_file)) %>%
+    left_join(df_dict_CCM,by=c("target_column"="data_file")) %>%
+    # select(target_column,tp,rho,mae,rmse) %>%
+    select(plotting_short,num_pred,rho) %>%
+    mutate(rho=signif(rho,digits=3)) %>%
+    arrange(-rho) %>%
+    rename(Driver=plotting_short,`Cross-map skill ()`=rho)
+
+```
+
+
+## Figure S1 Food Web Changes
+
+This figure is an illustration and hence has no corresponding code.
+
+## Figure S2 Remaining Time Series Variables
+
+Plot all the rest of the time series for the supplement.
+
+```{r Fig_SI_1 TSs}
+variables_in_main_plot <- list("oxydeep","Ptotal_lake","chl")
+
+data_lake_geneva_long <- data_lake_geneva %>%
+    gather(key="name",value="value", -date) %>%
+    mutate(type=ifelse(str_sub(name,-5,-1) == "model","model","obsv")) %>%
+    mutate(name = str_replace(name,"_model",""))
+
+variables_to_supplement <- setdiff(
+    intersect(unique(data_lake_geneva_long$name),
+              names(L_dict_plotting_long)),
+    c('date',variables_in_main_plot)
+)
+
+gs_S1 <- map(variables_to_supplement, function(var_i) {
+    
+    units <- str_extract(L_dict_plotting_long[var_i],"\\(.+")
+    
+    lab_short <-  paste(L_dict_plotting_short[var_i],units)
+    lab_i <- L_dict_plotting_long[var_i]
+    
+    data_lake_geneva_long %>%
+        filter(type=="obsv") %>%
+        filter(name==var_i) %>%
+        ggplot(aes(x=date,y=value)) + geom_line(color='black') +
+        # geom_line(data = {data_lake_geneva %>%
+        #         mutate(chl_mean = stats::filter(chl,rep(1,12)/12,method="convolution"))},
+        #         aes(y=sqrt(chl_mean)),color='grey20',lty=2) +
+        labs(y=lab_short,x="")  + theme_bw()
+    
+    }
+)
+
+do.call(grid.arrange,c(gs_S1,list(ncol=2)))
+
+cairo_pdf(file = "./Figures/Figure_S1 - Other Variable Time Series.pdf",width=6.5,height = 7)
+# do.call(grid.arrange,c(gs_S1,list(ncol=2)))
+cowplot::plot_grid(plotlist=map(gs_S1,ggplotGrob),ncol = 2,align = "v")
+dev.off()
+
+```
+
+## Figure S3 Identifying Mechanistic Embeddings for Chl and TP_surf
+
+Figure S5 provides the underpinning EDM analysis for main text Figure 2. We analyzed CCM relationships between chl-a and other study variables to narrow a list of candidates. Variables with lower CCM than another highly correlated candidate were discarded. Notably, the SIMSTRAT model imputed Surface Temperature (T_surf) and Thermocline Depth (Z_thermo) both showed a strong causal relationship to Chlorophyll than the station measurements. We then used a greedy search algorithm with this narrowed list to fill out an embedding with the target drivers, nutrient loading (PO4_lake) and temperature (T_surf_model). Optimal predictions are made with only one additional variable, Year_sine, which is the simple Fourier mode that tracks solar insolation. Importantly, this 3-dimensional nonlinear empirical model out-performs univariate EMD predictions of chlorophyll as well as just predicting with the monthly mean.
+
+```{r IMPORT for Fig S3}
+E_fig_S3 <- new.env()
+E_figS3_chl <- new.env()
+E_figS3_po4 <- new.env()
+load("./OUTPUTS/outputs_CCM.Rdata",envir=E_fig_S3)
+load('./OUTPUTS/mEDM_chl_baselines.Rdata',env=E_figS3_chl)
+load("./OUTPUTS/mEDM_chl_greedy.Rdata",env=E_figS3_chl)
+load('./OUTPUTS/mEDM_PO4_epi_baselines.Rdata',envir = E_figS3_po4) # results_univar,results_mEDM_multiview_fullfit,results_mEDM_multiview_nfold
+load('./OUTPUTS/mEDM_PO4_epi_greedy.Rdata',envir = E_figS3_po4) # results_mEDM_greedy
+```
+
+```{r}
+g_S4_A_plot <- with(E_figS3_chl, 
+                      results_mEDM_greedy %>%
+    mutate(embedding_label = str_replace_all(embedding_label,pattern=dictionary_extended_to_expressions %>% unlist())) %>%
+    mutate(embedding_label = make_label_parsable(embedding_label)) %>%
+    mutate(embedding_label = str_replace_all(embedding_label,"_model","")) %>%
+        # mutate(embedding_label = str_replace_all(embedding_label,"year_sine","sin(\u03BD)")) %>%
+ggplot(aes(x=theta,y=rho,color=embedding_label)) + 
+    geom_line(lwd=1.3) +
+    geom_line(data=results_univar,aes(color="Univariate"),lwd=1) +
+    geom_line(data=results_mEDM_seasonal,aes(color="Seasonal"),lwd=1) +
+    geom_hline(aes(yintercept=results_mEDM_multiview_fullfit$rho,color="Multiview"),lwd=1) +
+    # scale_color_viridis_d(labels= f_q_exp)
+    scale_color_jco(labels = f_q_exp) +
+    theme_bw() + labs(x='Nonlinearity (\u03B8)',y='Forecast Skill (\u03C1)',color=NULL)
+)
+
+
+t_S4_A <- E_fig_S3$out.CCM_chl %>%
+  filter(target_column!="chl") %>%
+  filter(!(target_column %in% c("chl","PE","T_bot","T_delta","T_diff_model"))) %>%
+  select(target_column,tp,rho) %>%
+  mutate(rho=signif(rho,digits=4)) %>%
+  mutate(target_column = str_replace_all(target_column,set_names(x=names(dictionary_expressions),nm=dictionary_expressions))) %>%
+  mutate(target_column = str_replace(target_column,"_model","~ (SIMStrat)")) %>%
+  rename(optimal_tp=tp) %>%
+  arrange(-rho)
+
+L_candidate_variables <- c('year_sine','chl','rhone','h_mix_model','PO4_epi')
+
+v_which_important <- `%in%`(t_S4_A$target_column,c('PO4_lake','T_surf_model',L_candidate_variables))
+
+ttheme_S2A <- ttheme_default(
+    base_size=9,
+    padding = unit(c(1,1),"mm"),
+    core=list(
+        fg_params=list(fontface= ifelse(v_which_important,"bold.italic","plain")        )
+        ),
+    parse = TRUE)
+
+g_S4_A_table <- tableGrob(t_S4_A, theme = ttheme_S2A)
+
+g_S4_B_plot <- with(E_figS3_po4, 
+                      results_mEDM_greedy %>%
+    mutate(embedding_label = str_replace_all(embedding_label,pattern=dictionary_extended_to_expressions %>% unlist())) %>%
+    mutate(embedding_label = make_label_parsable(embedding_label)) %>%
+    mutate(embedding_label = str_replace_all(embedding_label,"_model","")) %>%
+ggplot(aes(x=theta,y=rho,color=embedding_label)) + 
+    geom_line(lwd=1.3) +
+  geom_line(data=results_univar,aes(color="Univariate"),lwd=1) +
+    geom_blank(data=NULL,aes(color="Seasonal")) + # The seasonal model does very poorly, thus we insert a filler to avoid distorting the plot area but maintain the legend color labelling from panel A.
+    geom_hline(aes(yintercept=results_mEDM_multiview_fullfit$rho,color="Multiview"),lwd=1) +
+    scale_color_jco(labels = f_q_exp) +
+    theme_bw() + labs(x='Nonlinearity (\u03B8)',y='Forecast Skill (\u03C1)',color=NULL)
+)
+
+t_S4_B <- E_fig_S3$out.CCM_po4 %>%
+  filter(!(target_column %in% c("PO4_epi","PE","T_bot","T_delta","T_diff_model"))) %>%
+    select(target_column,tp,rho) %>%
+    mutate(rho=signif(rho,digits=4)) %>%
+    mutate(target_column = str_replace_all(target_column,set_names(x=names(dictionary_expressions),nm=dictionary_expressions))) %>%
+    mutate(target_column = str_replace(target_column,"_model","~ (SIMStrat)")) %>%
+    rename(optimal_tp=tp) %>%
+    arrange(-rho)
+
+L_candidate_variables <- c('year_sine','chl','rhone','h_mix_model','PO4_epi')
+
+v_which_important <- `%in%`(t_S4_B$target_column,c('PO4_lake','T_surf_model',L_candidate_variables))
+
+ttheme_S2B <- ttheme_default(
+    base_size=9,
+    padding = unit(c(1,1),"mm"),
+    core=list(
+        fg_params=list(fontface= ifelse(v_which_important,"bold.italic","plain")        )
+    ),
+    parse = TRUE)
+
+g_S4_B_table <- tableGrob(t_S4_A, theme = ttheme_S2A)
+```
+
+Put it all together
+
+```{r}
+g_S4_A <- arrangeGrob(g_S4_A_table,
+                       g_S4_A_plot + theme(legend.position = "bottom") + guides(color=guide_legend(ncol=1,title=NULL)),
+                       nrow=1,top = "Chlorophyll")
+g_S4_B <- arrangeGrob(g_S4_B_table,
+                       g_S4_B_plot + theme(legend.position = "bottom") + guides(color=guide_legend(ncol=1,title=NULL)),
+                       nrow=1,top = "TP (Surface)")
+
+
+cairo_pdf(file = "./Figures/Figure_S3 - mechanistic embeddings.pdf",width=6,height=7)
+grid.arrange(
+g_S4_A,
+g_S4_B,
+nrow=2
+)
+dev.off()
+```
+
+
